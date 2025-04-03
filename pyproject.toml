@@ -1,0 +1,102 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "aws-ssh-utils"
+description = "Easy AWS SSHing"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [
+    { name = "Michiel Vanderlee", email = "jmt.vanderlee@gmail.com" },
+]
+classifiers = [
+    "Intended Audience :: Information Technology",
+    "Intended Audience :: System Administrators",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: Software Development",
+    "Typing :: Typed",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+dependencies = [
+  "boto3",
+  "click",
+  "click_spinner",
+  "coloredlogs",
+  "environs",
+  "loguru",
+  "paramiko",
+  "questionary",
+]
+dynamic = ["version"]
+
+[project.urls]
+Homepage = "https://github.com/mvanderlee/aws-ssh-utils"
+
+[project.scripts]
+aws_ssh = "aws_ssh_utils.ssh:cli"
+
+[project.optional-dependencies]
+
+dev = [
+  "boto3-stubs[ec2,emr]",
+]
+test = [
+]
+publish = [
+  "hatch >= 1.7.0",
+]
+
+[tool.hatch.build]
+include = [
+  "aws_ssh_utils",
+]
+
+[tool.hatch.version]
+path = "aws_ssh_utils/__init__.py"
+
+[tool.isort]
+profile = "hug"
+line_length = 100
+
+[tool.coverage.run]
+parallel = true
+source = [
+  "aws_ssh_utils"
+]
+
+[tool.ruff]
+select = [
+  "E",  # pycodestyle errors
+  "W",  # pycodestyle warnings
+  "F",  # pyflakes
+  # "I",  # isort
+  "C",  # flake8-comprehensions
+  "B",  # flake8-bugbear
+]
+ignore = [
+  "B008",  # do not perform function calls in argument defaults
+  "B028",  # No explicit stacklevel argument found.
+  "C901",  # too complex
+]
+line-length = 130  # Enforce 130. But ~100 is recommended.
+
+
+[tool.ruff.per-file-ignores]
+"__init__.py" = ["F401"]
+"migrations/env.py" = ["E402"]
+
+[tool.pytest.ini_options]
+# https://pytest-asyncio.readthedocs.io/en/latest/reference/configuration.html
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "session"
