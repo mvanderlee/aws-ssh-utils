@@ -1,5 +1,9 @@
 # AWS SSH Utils
 
+[![Version](https://img.shields.io/pypi/v/aws-ssh-utils.svg)](https://pypi.org/project/aws-ssh-utils/)
+[![License](https://img.shields.io/pypi/l/aws-ssh-utils.svg)](#)
+[![Supported Python Versions](https://img.shields.io/pypi/pyversions/aws-ssh-utils.svg)](https://pypi.org/project/aws-ssh-utils/)
+
 ```shell
 pip install aws-ssh-utils
 
