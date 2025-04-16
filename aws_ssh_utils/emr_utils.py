@@ -161,13 +161,3 @@ def get_emr_instance_ips(
         ]
         for k, v in get_emr_instances(emr, cluster_id).items()
     }
-
-
-def get_instance_key_name(
-    emr: "EMRClient",
-    cluster_id: str,
-) -> str:
-    cluster = emr.describe_cluster(ClusterId=cluster_id)
-
-    key_name = cluster["Cluster"]["Ec2InstanceAttributes"]["Ec2KeyName"]
-    return key_name

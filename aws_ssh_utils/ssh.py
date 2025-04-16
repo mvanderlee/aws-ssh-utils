@@ -1,14 +1,18 @@
+import datetime as dt
 import logging
 import os
+import subprocess
 import sys
 import textwrap
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from hashlib import sha1
 from typing import TYPE_CHECKING
 
 import boto3
 import click
 import click_spinner
 import paramiko
+import paramiko.pkey
 import questionary
 from botocore.exceptions import ClientError
 from environs import Env
@@ -17,7 +21,6 @@ from loguru import logger
 from .emr_utils import (
     IP,
     get_emr_instance_ips,
-    get_instance_key_name,
     prompt_for_emr_cluster,
     prompt_for_emr_instance_group,
 )
@@ -28,6 +31,7 @@ if TYPE_CHECKING:
     from mypy_boto3_emr import EMRClient
 
 Env().read_env()  # Load .env file
+OPKSSH_PROVIDER_TAG = 'opkssh_provider'
 
 
 class ShellError(Exception):
@@ -248,19 +252,23 @@ def emr_ssh_all(
             exit(1)
 
 
-@cli.command('test')
-def test(**kwargs):
-    tmux('new-session -d -s "test" -n "window 1" "echo hello && $SHELL -i"')
-    tmux('new-window -n "window 2" -t "test:" "echo hello && $SHELL -i"')
-    tmux('switch-client -t "test:window 1"')
-
-
 @dataclass
 class SSHShell:
     hostname: str
     username: str
     key_filename: str
     terminal_title: str = None
+
+    private_key: paramiko.PKey = field(init=False)
+
+    def __post_init__(self):
+        if not os.path.isfile(self.key_filename):
+            raise ValueError(f'File {self.key_filename} does not exist')
+
+        self.private_key = paramiko.PKey.from_path(self.key_filename)
+        public_key_path = f'{self.key_filename}.pub'
+        if os.path.isfile(public_key_path):
+            self.private_key.load_certificate(public_key_path)
 
     def connect(self):
         self._open()
@@ -278,7 +286,11 @@ class SSHShell:
         ssh_client.load_host_keys(host_key_path)
         ssh_client.set_missing_host_key_policy(ConfirmAddPolicy())
         try:
-            ssh_client.connect(hostname=self.hostname, username=self.username, key_filename=self.key_filename)
+            ssh_client.connect(
+                hostname=self.hostname,
+                username=self.username,
+                pkey=self.private_key,
+            )
         except paramiko.BadHostKeyException as e:
             error_message = f'''
                 @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@
@@ -359,8 +371,18 @@ def get_ec2_ssh_options(
     key_file: str = None
 ) -> tuple[str, str, str, str]:
     instance = prompt_for_ec2_instance(b3s)
+    instance_tags = {
+        tag['Key'].lower(): tag['Value']
+        for tag in instance.tags
+    }
+
     if key_file is None:
-        key_file = try_to_find_ssh_key_file(instance.key_name)
+        # Support https://github.com/openpubkey/opkssh via tags
+        if OPKSSH_PROVIDER_TAG in instance_tags:
+           key_file = get_opkssh_key_file(instance_tags[OPKSSH_PROVIDER_TAG])
+
+        else:
+            key_file = try_to_find_ssh_key_file(instance.key_name)
 
     if user is None:
         logger.info('No user specified, attempting to detect required user...')
@@ -406,8 +428,17 @@ def get_emr_ssh_key_file_for_cluster(
     cluster_id: str,
 ) -> str:
     with click_spinner.spinner():
-        key_name = get_instance_key_name(emr, cluster_id)
-        key_file = try_to_find_ssh_key_file(key_name)
+        cluster = emr.describe_cluster(ClusterId=cluster_id)
+        cluster_tags = {
+            tag['Key'].lower(): tag['Value']
+            for tag in cluster['Cluster']['Tags']
+        }
+        # Support https://github.com/openpubkey/opkssh via tags
+        if OPKSSH_PROVIDER_TAG in cluster_tags:
+           key_file = get_opkssh_key_file(cluster_tags[OPKSSH_PROVIDER_TAG])
+        else:
+            key_name = cluster["Cluster"]["Ec2InstanceAttributes"]["Ec2KeyName"]
+            key_file = try_to_find_ssh_key_file(key_name)
 
     if key_file is None:
         should_continue = questionary.confirm(f'Could not find the ssh key {key_name}, would you like to continue?').unsafe_ask()
@@ -470,6 +501,23 @@ def get_ec2_name(ec2_instance: "Instance") -> str:
             return tag['Value']
 
     return ec2_instance.instance_id
+
+
+def get_opkssh_key_file(provider: str) -> str:
+    opkssh_key_file = os.path.join(os.path.expanduser('~/.ssh/'), f'opkssh_{sha1(provider.encode()).hexdigest()}')
+
+    if os.path.exists(opkssh_key_file) and os.path.getmtime(opkssh_key_file) > dt.datetime.now().timestamp() - 86400:
+        logger.info('Found existing opkssh key')
+    else:
+        logger.info('Detected opkssh, logging in')
+        cmd = f"opkssh login --provider '{provider}' -i '{opkssh_key_file}'"
+        process = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE)
+        process.wait()
+        if process.returncode != 0:
+            logger.error('Failed to authenticate using opkssh')
+            sys.exit(process.returncode)
+
+    return opkssh_key_file
 
 
 class ConfirmAddPolicy(paramiko.client.MissingHostKeyPolicy):
