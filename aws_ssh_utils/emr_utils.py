@@ -1,25 +1,27 @@
+from collections.abc import MutableMapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, MutableMapping
+from typing import TYPE_CHECKING, Literal
 
 import click_spinner
 import questionary
 
 if TYPE_CHECKING:
     from mypy_boto3_emr import EMRClient
-    from mypy_boto3_emr.type_defs import ClusterSummaryTypeDef, InstanceTypeDef
+    from mypy_boto3_emr.literals import ClusterStateType
+    from mypy_boto3_emr.type_defs import ClusterSummaryTypeDef, InstanceFleetTypeDef, InstanceGroupTypeDef, InstanceTypeDef
 
 
 @dataclass
 class IP:
-    private: str
-    public: str = None
+    private: str | None = None
+    public: str | None = None
 
 
 def prompt_for_emr_cluster(
     emr: "EMRClient",
-    prompt="Which cluster do you want to connect to?",
+    prompt: str = "Which cluster do you want to connect to?",
     # Either a list of application names, or a dict[name, version]
-    applications: dict[str, str] | list[str] = None,
+    applications: dict[str, str] | list[str] | None = None,
 ) -> tuple[str, str]:
     """Discovers the available EMR clusters and asks the user which to use.
 
@@ -41,7 +43,8 @@ def prompt_for_emr_cluster(
 
 def prompt_for_emr_instance_group(
     emr: "EMRClient",
-    cluster_id: str, prompt="Which instance group do you want to connect to?"
+    cluster_id: str,
+    prompt: str = "Which instance group do you want to connect to?",
 ) -> tuple[list[IP], str]:
     """Discovers the available instance groups for the selected EMR cluster.
         Note that instance group and instance fleet are both treated the same here.
@@ -64,16 +67,20 @@ def prompt_for_emr_instance_group(
 
 def does_cluster_have_applications(
     emr: "EMRClient",
-    cluster_id: str,
-    applications: dict[str, str] | list[str] = None,
+    cluster_id: str | None = None,
+    applications: dict[str, str] | list[str] | None = None,
 ) -> bool:
-    cluster_details = emr.describe_cluster(ClusterId=cluster_id).get("Cluster")
+    if applications is None or cluster_id is None:
+        return True
 
+    cluster_details = emr.describe_cluster(ClusterId=cluster_id).get("Cluster")
     if not cluster_details:
         return False
 
-    cluster_applications = {a["Name"]: a["Version"] for a in cluster_details["Applications"]}
-
+    cluster_applications = {
+        a.get("Name"): a.get("Version")
+        for a in cluster_details.get("Applications", [])
+    }
     if isinstance(applications, MutableMapping):
         # If a map, check that all the required applications are in the cluster and at the version
         return all(v == cluster_applications.get(k) for k, v in applications.items())
@@ -83,9 +90,9 @@ def does_cluster_have_applications(
 
 def get_emr_clusters(
     emr: "EMRClient",
-    states: list[str] = None,
+    states: Sequence["ClusterStateType"] | None = None,
     # Either a list of application names, or a dict[name, version]
-    applications: dict[str, str] | list[str] = None,
+    applications: dict[str, str] | list[str] | None = None,
 ) -> dict[str, tuple[str, str]]:
     """Discover the available EMR cluster
 
@@ -99,25 +106,37 @@ def get_emr_clusters(
     ).get("Clusters", [])
 
     if applications:
-        clusters = [c for c in clusters if does_cluster_have_applications(emr, c["Id"], applications=applications)]
+        clusters = [
+            c for c in clusters
+            if does_cluster_have_applications(emr, c.get("Id"), applications=applications)
+        ]
 
     def get_display_name(c: "ClusterSummaryTypeDef") -> str:
-        created = c["Status"]["Timeline"]["CreationDateTime"].strftime("%Y-%m-%d %H:%M")
-        return f"{c['Name']} - {c['Id']} - {created}"
+        created = c.get("Status", {}).get(
+            "Timeline", {},
+        ).get("CreationDateTime")
+        if created:
+            created = created.strftime("%Y-%m-%d %H:%M")
+        return f"{c.get('Name')} - {c.get('Id')} - {created}"
 
-    return {f"{get_display_name(c)}": (c["Id"], c["Name"]) for c in clusters}
+    return {
+        f"{get_display_name(c)}": (c.get("Id", ""), c.get("Name", ""))
+        for c in clusters
+    }
 
 
 def get_emr_groups(
     emr: "EMRClient",
     cluster_id: str,
-):
+) -> tuple[list["InstanceFleetTypeDef"] | list["InstanceGroupTypeDef"], Literal['InstanceFleetId', 'InstanceGroupId']]:
     """Discover the EMR groups.
 
         Returns the groups and the id_name to use for list_instances
     """
     cluster_details = emr.describe_cluster(ClusterId=cluster_id)
-    instance_collection_type = cluster_details["Cluster"].get("InstanceCollectionType")
+    instance_collection_type = cluster_details["Cluster"].get(
+        "InstanceCollectionType",
+    )
 
     if instance_collection_type == "INSTANCE_FLEET":
         id_name = "InstanceFleetId"
@@ -129,6 +148,11 @@ def get_emr_groups(
         groups = emr.list_instance_groups(ClusterId=cluster_id)
         groups = groups["InstanceGroups"]
 
+    else:
+        raise ValueError(
+            f"Unknown instance collection type: {instance_collection_type}",
+        )
+
     return groups, id_name
 
 
@@ -139,12 +163,14 @@ def get_emr_instances(
     """Discover the running EMR instances per instance group"""
     groups, id_name = get_emr_groups(emr, cluster_id)
 
-    groups = {g["Id"]: g["Name"] for g in groups}
+    groups = {g.get("Id", ""): g.get("Name", "") for g in groups}
     grouped_instances = {g: [] for g in groups.values()}
 
-    instances = emr.list_instances(ClusterId=cluster_id, InstanceStates=["RUNNING"])
+    instances = emr.list_instances(
+        ClusterId=cluster_id, InstanceStates=["RUNNING"],
+    )
     for instance in instances["Instances"]:
-        grouped_instances[groups[instance[id_name]]].append(instance)
+        grouped_instances[groups[instance.get(id_name, "")]].append(instance)
 
     return grouped_instances
 
@@ -156,7 +182,7 @@ def get_emr_instance_ips(
     '''Returns a dict of IPs per group'''
     return {
         k: [
-            IP(x["PrivateIpAddress"], x.get("PublicIpAddress"))
+            IP(x.get("PrivateIpAddress"), x.get("PublicIpAddress"))
             for x in v
         ]
         for k, v in get_emr_instances(emr, cluster_id).items()

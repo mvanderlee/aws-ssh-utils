@@ -20,8 +20,10 @@
 import os
 import socket
 import sys
+from importlib.util import find_spec
 
 import paramiko
+from loguru import logger
 
 # https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h2-Bracketed-Paste-Mode
 START_PASTE = "\x1B\x5B\x32\x30\x30\x7E"  # ESC[200~
@@ -43,24 +45,15 @@ ALL_CODECS = [
     'kz1048', 'mac_cyrillic', 'mac_greek', 'mac_iceland', 'mac_latin2', 'mac_roman',
     'mac_turkish', 'ptcp154', 'shift_jis', 'shift_jis_2004', 'shift_jisx0213',
     'utf_32', 'utf_32_be', 'utf_32_le', 'utf_16', 'utf_16_be', 'utf_16_le', 'utf_7',
-    'utf_8', 'utf_8_sig'
+    'utf_8', 'utf_8_sig',
 ]
 
 # windows does not have termios...
-try:
-    import termios
-    import tty
+has_termios = find_spec("termios") is not None and find_spec("tty") is not None
 
-    has_termios = True
-except ImportError:
-    has_termios = False
 
-if os.getenv('TMUX'):
-    _TITLE_START = '\x1bk'
-    _TITLE_END = '\x1b\\'
-else:
-    _TITLE_START = '\x1b]0;'
-    _TITLE_END = '\x07'
+_TITLE_START = '\x1bk' if os.getenv('TMUX') else '\x1b]0;'
+_TITLE_END = '\x1b\\' if os.getenv('TMUX') else '\x07'
 
 
 def is_int(val: str) -> bool:
@@ -105,19 +98,21 @@ def decode(chars: bytes) -> str:
         return chars.decode('utf-8')
     except Exception:
         # Attempt to decode each individual character
-        def decode_char(byte: bytes) -> str:
+        def decode_char(byte: int) -> str:
             for codec in ALL_CODECS:
                 try:
-                    c = byte.decode(codec)
+                    c = byte.to_bytes(1, 'big').decode(codec)
                     return c
                 except Exception:
-                    pass
+                    logger.debug(
+                        f'Failed to decode character {byte} as {codec}',
+                    )
             else:
                 # Failed to decode character, return replacement character.
                 # https://www.fileformat.info/info/unicode/char/fffd/index.htm
                 return '\uFFFD'
 
-        return ''.join(decode_char(b for b in chars))
+        return ''.join(decode_char(b) for b in chars)
 
 
 def posix_readkey() -> str:
@@ -133,7 +128,7 @@ def posix_readkey() -> str:
             Reads one character and handles encoding errors
             `htop` scrolling for example uses cp037
         '''
-        return decode(sys.stdin.buffer.raw.read(1))
+        return decode(sys.stdin.buffer.raw.read(1))  # pyright: ignore[reportAttributeAccessIssue, reportUnknownArgumentType]
 
     c1 = read()
 
@@ -183,20 +178,25 @@ def windows_readkey() -> str:
     return "\x00" + ch2
 
 
-def posix_shell(chan: paramiko.Channel, allow_title_changes: bool = True):  # noqa: C901
-    import select
+def posix_shell(chan: paramiko.Channel, allow_title_changes: bool = True):
+    if not has_termios:
+        raise RuntimeError("Termios is not available on this system")
 
-    oldtty = termios.tcgetattr(sys.stdin)
+    import select
+    import termios
+    import tty
+
+    oldtty = termios.tcgetattr(sys.stdin)  # pyright: ignore[reportAttributeAccessIssue]
 
     # input_history = []
     # output_history = []
 
     try:
-        tty.setraw(sys.stdin.fileno())
-        tty.setcbreak(sys.stdin.fileno())
+        tty.setraw(sys.stdin.fileno())  # pyright: ignore[reportAttributeAccessIssue]
+        tty.setcbreak(sys.stdin.fileno())  # pyright: ignore[reportAttributeAccessIssue]
         chan.settimeout(0.0)
         while True:
-            r, w, e = select.select([chan, sys.stdin], [], [])
+            r, _, _ = select.select([chan, sys.stdin], [], [])
             if chan in r:
                 try:
                     data = decode(chan.recv(1024))
@@ -210,7 +210,7 @@ def posix_shell(chan: paramiko.Channel, allow_title_changes: bool = True):  # no
                     # output_history.append(data)
                     sys.stdout.write(data)
                     sys.stdout.flush()
-                except socket.timeout:
+                except TimeoutError:
                     pass
             if sys.stdin in r:
                 key = posix_readkey()
@@ -223,7 +223,7 @@ def posix_shell(chan: paramiko.Channel, allow_title_changes: bool = True):  # no
                     key = posix_readkey()
                     # Until we reach the end of the pasted text
                     while key != END_PASTE:
-                        chan.send(key)
+                        chan.send(key.encode())
                         # input_history.append(key)
                         key = posix_readkey()
                     # We've exhausted the paste event, wait for next event
@@ -231,11 +231,11 @@ def posix_shell(chan: paramiko.Channel, allow_title_changes: bool = True):  # no
 
                 if len(key) == 0:
                     break
-                chan.send(key)
+                chan.send(key.encode())
                 # input_history.append(key)
 
     finally:
-        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, oldtty)
+        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, oldtty)  # pyright: ignore[reportAttributeAccessIssue]
 
     # Useful in debugging how control characters were send
     # from pprint import pprint
@@ -248,15 +248,17 @@ def windows_shell(chan: paramiko.Channel, allow_title_changes: bool = True):
     import threading
 
     sys.stdout.write(
-        "Line-buffered terminal emulation. Press F6 or ^Z to send EOF.\r\n\r\n"
+        "Line-buffered terminal emulation. Press F6 or ^Z to send EOF.\r\n\r\n",
     )
 
-    def writeall(sock):
+    def writeall(sock: socket.socket):
         while True:
             data = sock.recv(256).decode()
             if not data:
                 # Need user to input any character so we sys.stdin.read(1) completes and unblocks
-                sys.stdout.write("\r\n Connection closed. Press Enter to continue...\r\n")
+                sys.stdout.write(
+                    "\r\n Connection closed. Press Enter to continue...\r\n",
+                )
                 sys.stdout.flush()
                 break
 
@@ -274,7 +276,7 @@ def windows_shell(chan: paramiko.Channel, allow_title_changes: bool = True):
             d = windows_readkey()
             if not d or chan.closed:
                 break
-            chan.send(d)
+            chan.send(d.encode())
     except EOFError:
         # user hit ^Z or F6
         pass

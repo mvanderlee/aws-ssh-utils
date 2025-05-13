@@ -5,18 +5,20 @@ import subprocess
 import sys
 import textwrap
 from dataclasses import dataclass, field
-from hashlib import sha1
-from typing import TYPE_CHECKING
+from hashlib import sha256
+from types import TracebackType
+from typing import TYPE_CHECKING, Any
 
 import boto3
 import click
 import click_spinner
 import paramiko
-import paramiko.pkey
+import paramiko.client
 import questionary
 from botocore.exceptions import ClientError
 from environs import Env
 from loguru import logger
+from typing_extensions import override
 
 from .emr_utils import (
     IP,
@@ -31,20 +33,24 @@ if TYPE_CHECKING:
     from mypy_boto3_emr import EMRClient
 
 Env().read_env()  # Load .env file
+# CSV of issuer,client
 OPKSSH_PROVIDER_TAG = 'opkssh_provider'
+# EMR doesn't support comma's in tags.
+OPKSSH_ISSUER_TAG = 'opkssh_issuer'
+OPKSSH_CLIENT_TAG = 'opkssh_client'
 
 
 class ShellError(Exception):
     def __init__(self, message: str, exit_code: int = 1):
         super().__init__(message, exit_code)
-        self.message = message
-        self.exit_code = exit_code
+        self.message: str = message
+        self.exit_code: int = exit_code
 
 
 def set_terminal_title(title: str = ''):
     if os.name == 'nt':
         # Windows - CMD
-        os.system(f'title "{title}"')
+        os.system(f'title "{title}"')  # noqa: S605
 
         # Windows - Powershell - But it seems that the scripts are always ran inside CMD anyway.
         # os.system(f'$host.UI.RawUI.WindowTitle = {title}')
@@ -64,7 +70,7 @@ class SelectedEMRInstance:
     cluster_id: str
     cluster_name: str
     group_name: str
-    group_idx: str
+    group_idx: int
     ip: IP
 
 
@@ -76,9 +82,9 @@ def cli(
     long_log: bool = False,
     verbose: bool = False,
     quiet: bool = False,
-    **kwargs,
+    **kwargs: Any,
 ):
-    format = (
+    log_format = (
         "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | "
         "<level>{level: <8}</level> | "
         "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>"
@@ -86,7 +92,7 @@ def cli(
     level = "DEBUG" if verbose else 100 if quiet else "INFO"
 
     logger.remove()
-    logger.add(sys.stdout, level=level, format=format, colorize=True)
+    logger.add(sys.stdout, level=level, format=log_format, colorize=True)
 
 
 @cli.command('ec2')
@@ -96,12 +102,12 @@ def cli(
 @click.option('--private/--public', default=True, help="Connect to the instance's private or public IP")
 @click.option('-k/', '--key-file', default=None, help="Which key file to use to connect")
 def ec2_ssh(
-    profile: str = None,
-    region: str = None,
-    user: str = None,
+    profile: str | None = None,
+    region: str | None = None,
+    user: str | None = None,
     private: bool = True,
-    key_file: str = None,
-    **kwargs,
+    key_file: str | None = None,
+    **kwargs: Any,
 ):
     '''
         Asks user which EC2 instance they want to connect to,
@@ -111,16 +117,23 @@ def ec2_ssh(
     try:
         b3s = boto3.Session(profile_name=profile, region_name=region)
 
-        ip, user, key_file, instance_name = get_ec2_ssh_options(b3s=b3s, user=user, use_private_ip=private, key_file=key_file)
+        ip, user, key_file, instance_name = get_ec2_ssh_options(
+            b3s=b3s, user=user, use_private_ip=private, key_file=key_file,
+        )
         terminal_title = f'{user}@{instance_name}'
 
-        SSHShell(hostname=ip, username=user, key_filename=key_file, terminal_title=terminal_title).connect()
+        SSHShell(
+            hostname=ip, username=user, key_filename=key_file,
+            terminal_title=terminal_title,
+        ).connect()
     except ShellError as e:
         logger.error(e.message)
         exit(e.exit_code)
     except ClientError as e:
-        if e.response.get('Error') and e.response['Error'].get('Code') == 'ExpiredTokenException':
-            logger.log(logging.CRITICAL, 'Your AWS Token has expired. Please update and try again.')
+        if e.response.get('Error') and e.response.get('Error', {}).get('Code') == 'ExpiredTokenException':
+            logger.log(
+                logging.CRITICAL, 'Your AWS Token has expired. Please update and try again.',
+            )
             exit(1)
 
 
@@ -131,12 +144,12 @@ def ec2_ssh(
 @click.option('--private/--public', default=True, help="Connect to the instance's private or public IP")
 @click.option('-k/', '--key-file', default=None, help="Which key file to use to connect")
 def emr_ssh(
-    profile: str = None,
-    region: str = None,
-    user: str = None,
+    profile: str | None = None,
+    region: str | None = None,
+    user: str | None = None,
     private: bool = True,
-    key_file: str = None,
-    **kwargs
+    key_file: str | None = None,
+    **kwargs: Any,
 ):
     '''
         Asks user which Cluster and EC2 instance they want to connect to,
@@ -152,23 +165,31 @@ def emr_ssh(
             user = 'hadoop'
 
         if key_file is None:
-            key_file = get_emr_ssh_key_file_for_cluster(emr, emr_instance.cluster_id)
+            key_file = get_emr_ssh_key_file_for_cluster(
+                emr, emr_instance.cluster_id,
+            )
 
         if private:
             ip = emr_instance.ip.private
+            if ip is None:
+                raise ShellError(
+                    'The selected instance does not have a private IP',
+                )
         else:
             ip = emr_instance.ip.public
             if ip is None:
-                raise ShellError('The selected instance does not have a public IP')
+                raise ShellError(
+                    'The selected instance does not have a public IP',
+                )
 
         group_name = emr_instance.group_name.split(' ')[0]
-        postfix = f'[{emr_instance.group_idx}]' if emr_instance.group_idx is not None else ''
+        postfix = f'[{emr_instance.group_idx}]' or ''
         terminal_title = f'{emr_instance.cluster_name} - {group_name}{postfix}'
 
         with SSHShell(hostname=ip, username=user, key_filename=key_file, terminal_title=terminal_title) as shell:
             if group_name.lower().startswith('core'):
-                shell.send('sudo su\r\n')
-                shell.send('cd /var/log/hadoop-yarn/containers\r\n')
+                shell.send(b'sudo su\r\n')
+                shell.send(b'cd /var/log/hadoop-yarn/containers\r\n')
 
         set_terminal_title()
 
@@ -176,8 +197,10 @@ def emr_ssh(
         logger.error(e.message)
         exit(e.exit_code)
     except ClientError as e:
-        if e.response.get('Error') and e.response['Error'].get('Code') == 'ExpiredTokenException':
-            logger.log(logging.CRITICAL, 'Your AWS Token has expired. Please update and try again.')
+        if e.response.get('Error') and e.response.get('Error', {}).get('Code') == 'ExpiredTokenException':
+            logger.log(
+                logging.CRITICAL, 'Your AWS Token has expired. Please update and try again.',
+            )
             exit(1)
 
 
@@ -188,12 +211,12 @@ def emr_ssh(
 @click.option('--private/--public', default=True, help="Connect to the instance's private or public IP")
 @click.option('-k/', '--key-file', default=None, help="Which key file to use to connect")
 def emr_ssh_all(
-    profile: str = None,
-    region: str = None,
-    user: str = None,
+    profile: str | None = None,
+    region: str | None = None,
+    user: str | None = None,
     private: bool = True,
-    key_file: str = None,
-    **kwargs,
+    key_file: str | None = None,
+    **kwargs: Any,
 ):
     '''
         Asks user which Cluster and EC2 instance they want to connect to,
@@ -217,18 +240,23 @@ def emr_ssh_all(
 
         window_order = ['Master', 'Primary', 'Core', 'Task']
 
-        def get_ip(ip: IP) -> str:
+        def get_ip(ip: IP) -> str | None:
             if private:
                 return ip.private
             else:
                 if ip.public is None:
-                    raise ShellError(f'The instance with private IP {ip.private} does not have a public IP')
+                    raise ShellError(
+                        f'The instance with private IP {ip.private} does not have a public IP',
+                    )
                 return ip.public
 
         window_cmds = [
             # Add "|| $SHELL -i" so that if the ssh session fails, we still have a window so we can look at the error.
             # without this, tmux will close the window.
-            (f'{group_name} - {instance_num}', f'ssh -i {key_file} {user}@{get_ip(instance_ip)} || $SHELL -i')
+            (
+                f'{group_name} - {instance_num}',
+                f'ssh -i {key_file} {user}@{get_ip(instance_ip)} || $SHELL -i',
+            )
             for group_name, instance_ips in sorted(grouped_instances.items(), key=lambda t: window_order.index(t[0]))
             for instance_num, instance_ip in enumerate(instance_ips, start=1)
         ]
@@ -236,10 +264,14 @@ def emr_ssh_all(
         session_name = cluster_name
         first_window_name, first_cmd = window_cmds[0]
         # Create a new tmux session with the EMR cluster name as the session name and open the first ssh connection
-        tmux(f'new-session -d -s "{session_name}" -n "{first_window_name}" "{first_cmd}"')
+        tmux(
+            f'new-session -d -s "{session_name}" -n "{first_window_name}" "{first_cmd}"',
+        )
         # Create a new tmux window and open the ssh connections
         for window_cmd in window_cmds[1:]:
-            tmux(f'new-window -t "{session_name}:" -n "{window_cmd[0]}" "{window_cmd[1]}"')
+            tmux(
+                f'new-window -t "{session_name}:" -n "{window_cmd[0]}" "{window_cmd[1]}"',
+            )
         # Now switch to the session's first window
         tmux(f'switch-client -t "{session_name}:{first_window_name}"')
 
@@ -247,8 +279,10 @@ def emr_ssh_all(
         logger.error(e.message)
         exit(e.exit_code)
     except ClientError as e:
-        if e.response.get('Error') and e.response['Error'].get('Code') == 'ExpiredTokenException':
-            logger.log(logging.CRITICAL, 'Your AWS Token has expired. Please update and try again.')
+        if e.response.get('Error') and e.response.get('Error', {}).get('Code') == 'ExpiredTokenException':
+            logger.log(
+                logging.CRITICAL, 'Your AWS Token has expired. Please update and try again.',
+            )
             exit(1)
 
 
@@ -256,27 +290,32 @@ def emr_ssh_all(
 class SSHShell:
     hostname: str
     username: str
-    key_filename: str
-    terminal_title: str = None
+    key_filename: str | None = None
+    terminal_title: str | None = None
 
     private_key: paramiko.PKey = field(init=False)
+    _ssh_client: paramiko.SSHClient = field(init=False)
+    _channel: paramiko.Channel = field(init=False)
 
     def __post_init__(self):
-        if not os.path.isfile(self.key_filename):
-            raise ValueError(f'File {self.key_filename} does not exist')
+        if self.key_filename is not None:
+            if not os.path.isfile(self.key_filename):
+                raise ValueError(f'File {self.key_filename} does not exist')
 
-        self.private_key = paramiko.PKey.from_path(self.key_filename)
-        public_key_path = f'{self.key_filename}.pub'
-        if os.path.isfile(public_key_path):
-            self.private_key.load_certificate(public_key_path)
+            self.private_key = paramiko.PKey.from_path(self.key_filename)
+            public_key_path = f'{self.key_filename}.pub'
+            if os.path.isfile(public_key_path):
+                self.private_key.load_certificate(public_key_path)
 
     def connect(self):
         self._open()
         self._launch()
         self._close()
 
-    def _open(self):
-        logger.info(f'Opening SSH: ssh -i {self.key_filename} {self.username}@{self.hostname}')
+    def _open(self) -> paramiko.Channel:
+        logger.info(
+            f'Opening SSH: ssh -i {self.key_filename} {self.username}@{self.hostname}',
+        )
 
         terminal_size = os.get_terminal_size()
 
@@ -313,8 +352,11 @@ class SSHShell:
             '''
             raise ShellError(textwrap.dedent(error_message), 255) from None
 
-        channel = ssh_client.get_transport().open_session()
-        channel.get_pty(term=os.getenv('TERM', 'xterm-256color'), width=terminal_size.columns, height=terminal_size.lines)
+        channel = ssh_client.get_transport().open_session()  # pyright: ignore[reportOptionalMemberAccess]
+        channel.get_pty(
+            term=os.getenv('TERM', 'xterm-256color'),
+            width=terminal_size.columns, height=terminal_size.lines,
+        )
         channel.invoke_shell()
 
         self._ssh_client = ssh_client
@@ -325,7 +367,9 @@ class SSHShell:
         return channel
 
     def _launch(self):
-        interactive_shell(self._channel, allow_title_changes=not self.terminal_title)
+        interactive_shell(
+            self._channel, allow_title_changes=not self.terminal_title,
+        )
 
     def _close(self):
         self._ssh_client.close()
@@ -336,16 +380,16 @@ class SSHShell:
     def __enter__(self):
         return self._open()
 
-    def __exit__(self, exception_type, exception_value, traceback):
+    def __exit__(self, exception_type: type[BaseException] | None, exception_value: BaseException | None, traceback: TracebackType | None):
         self._launch()
         self._close()
 
 
 def tmux(command: str):
-    os.system(f'tmux {command}')
+    os.system(f'tmux {command}')  # noqa: S605
 
 
-def try_to_find_ssh_key_file(key_name: str) -> str:
+def try_to_find_ssh_key_file(key_name: str) -> str | None:
     '''Recursively iterate over the `~/.ssh/` folder to find the matching key'''
     if key_name:
         for dirpath, _, filenames in os.walk(os.path.expanduser('~/.ssh/')):
@@ -357,7 +401,7 @@ def try_to_find_ssh_key_file(key_name: str) -> str:
     return None
 
 
-def get_ec2_image_name(instance) -> str:
+def get_ec2_image_name(instance: "Instance") -> str | None:
     try:
         return instance.image.name
     except AttributeError:
@@ -366,31 +410,34 @@ def get_ec2_image_name(instance) -> str:
 
 def get_ec2_ssh_options(
     b3s: boto3.Session,
-    user: str = None,
+    user: str | None = None,
     use_private_ip: bool = True,
-    key_file: str = None
-) -> tuple[str, str, str, str]:
+    key_file: str | None = None,
+) -> tuple[str, str, str | None, str]:
     instance = prompt_for_ec2_instance(b3s)
     instance_tags = {
-        tag['Key'].lower(): tag['Value']
+        tag.get('Key', '').lower(): tag.get('Value', '')
         for tag in instance.tags
     }
 
     if key_file is None:
         # Support https://github.com/openpubkey/opkssh via tags
         if OPKSSH_PROVIDER_TAG in instance_tags:
-           key_file = get_opkssh_key_file(instance_tags[OPKSSH_PROVIDER_TAG])
-
+            key_file = get_opkssh_key_file(instance_tags[OPKSSH_PROVIDER_TAG])
+        elif OPKSSH_ISSUER_TAG in instance_tags and OPKSSH_CLIENT_TAG in instance_tags:
+            key_file = get_opkssh_key_file(
+                ','.join([
+                    instance_tags[OPKSSH_ISSUER_TAG],
+                    instance_tags[OPKSSH_CLIENT_TAG],
+                ]),
+            )
         else:
             key_file = try_to_find_ssh_key_file(instance.key_name)
 
     if user is None:
         logger.info('No user specified, attempting to detect required user...')
         image_name = get_ec2_image_name(instance)
-        if 'ubuntu' in image_name:
-            user = 'ubuntu'
-        else:
-            user = 'ec2-user'
+        user = 'ubuntu' if image_name and 'ubuntu' in image_name.lower() else 'ec2-user'
 
     if use_private_ip:
         ip = instance.private_ip_address
@@ -408,10 +455,10 @@ def get_emr_ssh_options(
     cluster_id, cluster_name = prompt_for_emr_cluster(emr)
     instance_ips, group_name = prompt_for_emr_instance_group(emr, cluster_id)
 
-    instance_ips = sorted(instance_ips, key=lambda ips: ips.private)
+    instance_ips = sorted(instance_ips, key=lambda ips: ips.private or "")
 
     instance_options = [
-        f'{ip.private} ({ip.public})' if ip.public else ip.private
+        f'{ip.private} ({ip.public})' if ip.public else f'{ip.private}'
         for ip in instance_ips
     ]
     instance_ip = questionary.select(
@@ -426,24 +473,38 @@ def get_emr_ssh_options(
 def get_emr_ssh_key_file_for_cluster(
     emr: "EMRClient",
     cluster_id: str,
-) -> str:
+) -> str | None:
     with click_spinner.spinner():
         cluster = emr.describe_cluster(ClusterId=cluster_id)
         cluster_tags = {
-            tag['Key'].lower(): tag['Value']
-            for tag in cluster['Cluster']['Tags']
+            tag.get('Key', '').lower(): tag.get('Value', '')
+            for tag in cluster['Cluster'].get('Tags', [])
         }
+
+        key_file = key_name = None
         # Support https://github.com/openpubkey/opkssh via tags
         if OPKSSH_PROVIDER_TAG in cluster_tags:
-           key_file = get_opkssh_key_file(cluster_tags[OPKSSH_PROVIDER_TAG])
-        else:
-            key_name = cluster["Cluster"]["Ec2InstanceAttributes"]["Ec2KeyName"]
+            key_file = get_opkssh_key_file(cluster_tags[OPKSSH_PROVIDER_TAG])
+        elif OPKSSH_ISSUER_TAG in cluster_tags and OPKSSH_CLIENT_TAG in cluster_tags:
+            key_file = get_opkssh_key_file(
+                ','.join([
+                    cluster_tags[OPKSSH_ISSUER_TAG],
+                    cluster_tags[OPKSSH_CLIENT_TAG],
+                ]),
+            )
+
+        if key_file is None:
+            key_name = cluster["Cluster"].get(
+                "Ec2InstanceAttributes", {},
+            ).get("Ec2KeyName", "")
             key_file = try_to_find_ssh_key_file(key_name)
 
-    if key_file is None:
-        should_continue = questionary.confirm(f'Could not find the ssh key {key_name}, would you like to continue?').unsafe_ask()
-        if not should_continue:
-            exit(1)
+        if key_file is None:
+            should_continue = questionary.confirm(
+                f'Could not find the ssh key {key_name}, would you like to continue?',
+            ).unsafe_ask()
+            if not should_continue:
+                exit(1)
 
     return key_file
 
@@ -497,21 +558,25 @@ def prompt_for_ec2_instance(
 def get_ec2_name(ec2_instance: "Instance") -> str:
     '''Takes in the boto3 EC2 resource instance object'''
     for tag in ec2_instance.tags:
-        if tag['Key'] == 'Name':
-            return tag['Value']
+        if tag.get('Key') == 'Name':
+            return tag.get('Value', '')
 
     return ec2_instance.instance_id
 
 
 def get_opkssh_key_file(provider: str) -> str:
-    opkssh_key_file = os.path.join(os.path.expanduser('~/.ssh/'), f'opkssh_{sha1(provider.encode()).hexdigest()}')
+    opkssh_key_file = os.path.join(
+        os.path.expanduser(
+            '~/.ssh/',
+        ), f'opkssh_{sha256(provider.encode()).hexdigest()}',
+    )
 
     if os.path.exists(opkssh_key_file) and os.path.getmtime(opkssh_key_file) > dt.datetime.now().timestamp() - 86400:
         logger.info('Found existing opkssh key')
     else:
         logger.info('Detected opkssh, logging in')
         cmd = f"opkssh login --provider '{provider}' -i '{opkssh_key_file}'"
-        process = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE)
+        process = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE)  # noqa: S602
         process.wait()
         if process.returncode != 0:
             logger.error('Failed to authenticate using opkssh')
@@ -526,16 +591,28 @@ class ConfirmAddPolicy(paramiko.client.MissingHostKeyPolicy):
     local `.HostKeys` object, and saving it.  This is used by `.SSHClient`.
     """
 
-    def missing_host_key(self, client, hostname, key):
-        logger.warning(f"Unknown {key.get_name()} host key for {hostname}: {key.fingerprint}")
-        should_add = questionary.confirm("Continue and add host key?").unsafe_ask()
+    @override
+    def missing_host_key(self, client: paramiko.SSHClient, hostname: str, key: paramiko.PKey):
+        logger.warning(
+            f"Unknown {key.get_name()} host key for {hostname}: {key.fingerprint}",
+        )
+        should_add = questionary.confirm(
+            "Continue and add host key?",
+        ).unsafe_ask()
         if should_add:
-            client._host_keys.add(hostname, key.get_name(), key)
-            if client._host_keys_filename is not None:
-                client.save_host_keys(client._host_keys_filename)
+            client.get_host_keys().add(hostname, key.get_name(), key)
+            host_key_filename: str | None = (
+                client._host_keys_filename  # pyright: ignore[reportAttributeAccessIssue]
+            )
+            if host_key_filename is not None:
+                client.save_host_keys(host_key_filename)
                 logger.info('Added host key')
             else:
-                logger.warning('Failed to add host key. No host key file defined!')
+                logger.warning(
+                    'Failed to add host key. No host key file defined!',
+                )
 
         else:
-            raise paramiko.SSHException(f"Server {hostname!r} not found in known_hosts")
+            raise paramiko.SSHException(
+                f"Server {hostname!r} not found in known_hosts",
+            )

@@ -37,6 +37,7 @@ dependencies = [
   "loguru",
   "paramiko",
   "questionary",
+  "typing_extensions",
 ]
 dynamic = ["version"]
 
@@ -65,9 +66,6 @@ include = [
 [tool.hatch.version]
 path = "aws_ssh_utils/__init__.py"
 
-[tool.isort]
-profile = "hug"
-line_length = 100
 
 [tool.coverage.run]
 parallel = true
@@ -75,28 +73,89 @@ source = [
   "aws_ssh_utils"
 ]
 
+[tool.autopep8]
+max_line_length = 130
+
 [tool.ruff]
-select = [
-  "E",  # pycodestyle errors
-  "W",  # pycodestyle warnings
-  "F",  # pyflakes
-  # "I",  # isort
-  "C",  # flake8-comprehensions
-  "B",  # flake8-bugbear
+exclude = [
+    "*.ipynb",
+    "**/_version.py",
 ]
-ignore = [
-  "B008",  # do not perform function calls in argument defaults
-  "B028",  # No explicit stacklevel argument found.
-  "C901",  # too complex
+lint.select = [
+    "E",  # pycodestyle errors
+    "W",  # pycodestyle warnings
+    "F",  # pyflakes
+    "I",  # isort
+    "C",  # flake8-comprehensions
+    "B",  # flake8-bugbear
+    "A",  # flake8-builtins
+    "N",  # pep8-naming
+    "UP",  # pyupgrade
+    "S",  # flake8-bandit
+    "COM",  # flake8-commas
+    "ISC",  # flake8-implicit-str-concat
+    "INP",  # flake8-no-pep420
+    "PIE",  # flake8-pie
+    "SIM",  # flake8-simplify
+    "RUF",  # Ruff-specific rules
+    "T20",  # flake8-print
+    "PT",  # flake8-pytest-style
 ]
+lint.ignore = [
+    "B008",  # do not perform function calls in argument defaults
+    "B028",  # No explicit stacklevel argument found.
+    "C408",  # unnecessary-collection-call - Rewrite as a literal
+    "C901",  # too complex
+    "PT003",  # pytest-extraneous-scope-function
+
+    # TODO: remove
+    "A002",  # builtin-argument-shadowing
+    "PT011",  # pytest-raises-too-broad
+    "N818",  # error-suffix-on-exception-name
+
+    # Unsure, need more data
+    "SIM117",  # multiple-with-statements - In general good, but sometimes becomes harder to read, i.e.: aiohttp?
+]
+# The formatter wraps lines at a length of 88.
 line-length = 130  # Enforce 130. But ~100 is recommended.
 
+[tool.ruff.lint.pycodestyle]
+max-line-length = 150  # E501 reports lines that exceed the length of 150.
 
-[tool.ruff.per-file-ignores]
+[tool.ruff.format]
+quote-style = "preserve"  # Don't change quotes - https://docs.astral.sh/ruff/settings/#format_quote-style
+
+[tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401"]
-"migrations/env.py" = ["E402"]
+
+[tool.ruff.lint.flake8-bugbear]
+# Allow default arguments like, e.g., `data: List[str] = fastapi.Query(None)`.
+extend-immutable-calls = []
 
 [tool.pytest.ini_options]
 # https://pytest-asyncio.readthedocs.io/en/latest/reference/configuration.html
 asyncio_mode = "auto"
+asyncio_default_test_loop_scope = "session"
 asyncio_default_fixture_loop_scope = "session"
+
+[tool.pyright]
+venvPath = "."
+venv = ".venv"
+
+include = [
+    "aws_ssh_utils/",
+]
+
+pythonVersion = "3.11"
+
+# basedpyright exclusions
+reportAny = "none"
+reportUnreachable = "none"
+reportExplicitAny = "none"
+reportUnusedCallResult = "none"
+reportUnknownMemberType = "none"
+reportUnusedParameter = "none"
+reportUntypedFunctionDecorator = "none"
+reportMissingTypeStubs = "none"
+reportUnknownVariableType = "none"
+reportImplicitStringConcatenation = "none"

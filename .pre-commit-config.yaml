@@ -1,0 +1,45 @@
+repos:
+- repo: https://github.com/pre-commit/pre-commit-hooks
+  rev: v5.0.0
+  hooks:
+  - id: check-added-large-files
+    exclude: ^uv.lock
+  - id: check-shebang-scripts-are-executable
+  # - id: check-yaml
+  - id: detect-aws-credentials
+  - id: detect-private-key
+  - id: mixed-line-ending
+  - id: end-of-file-fixer
+  - id: trailing-whitespace
+
+- repo: https://github.com/asottile/pyupgrade
+  rev: v3.19.1
+  hooks:
+  - id: pyupgrade
+
+- repo: https://github.com/hhatto/autopep8
+  rev: 'v2.3.2'
+  hooks:
+  - id: autopep8
+
+- repo: https://github.com/astral-sh/ruff-pre-commit
+  rev: v0.11.6
+  hooks:
+    # Run the linter.
+    - id: ruff
+      args: [ --fix ]
+
+- repo: https://github.com/asottile/add-trailing-comma
+  rev: v3.1.0
+  hooks:
+  - id: add-trailing-comma
+
+- repo: https://github.com/RobertCraigie/pyright-python
+  rev: v1.1.400
+  hooks:
+  - id: pyright
+    exclude: tests/
+
+ci:
+  autofix_commit_msg: 🎨 [pre-commit.ci] Auto format from pre-commit.com hooks
+  autoupdate_commit_msg: ⬆ [pre-commit.ci] pre-commit autoupdate
