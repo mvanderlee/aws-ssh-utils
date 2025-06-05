@@ -575,7 +575,14 @@ def get_opkssh_key_file(provider: str) -> str:
         logger.info('Found existing opkssh key')
     else:
         logger.info('Detected opkssh, logging in')
-        cmd = f"opkssh login --provider '{provider}' -i '{opkssh_key_file}'"
+        cmd = [
+            "opkssh",
+            "login",
+            "--provider",
+            provider,
+            "-i",
+            opkssh_key_file,
+        ]
         process = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE)  # noqa: S602
         process.wait()
         if process.returncode != 0:
