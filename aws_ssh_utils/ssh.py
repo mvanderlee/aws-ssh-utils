@@ -583,10 +583,14 @@ def get_opkssh_key_file(provider: str) -> str:
             "-i",
             opkssh_key_file,
         ]
-        process = subprocess.Popen(cmd, shell=True, stdout=subprocess.PIPE)  # noqa: S602
+        process = subprocess.Popen(cmd, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)  # noqa: S603
         process.wait()
         if process.returncode != 0:
             logger.error('Failed to authenticate using opkssh')
+            if process.stdout:
+                logger.info(process.stdout.read().decode())
+            if process.stderr:
+                logger.error(process.stderr.read().decode())
             sys.exit(process.returncode)
 
     return opkssh_key_file
