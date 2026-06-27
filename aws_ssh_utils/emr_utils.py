@@ -25,7 +25,7 @@ def prompt_for_emr_cluster(
 ) -> tuple[str, str]:
     """Discovers the available EMR clusters and asks the user which to use.
 
-        Returns the cluster id of the cluster that the user selected.
+    Returns the cluster id of the cluster that the user selected.
     """
     # Discover available clusters
     with click_spinner.spinner():
@@ -47,9 +47,9 @@ def prompt_for_emr_instance_group(
     prompt: str = "Which instance group do you want to connect to?",
 ) -> tuple[list[IP], str]:
     """Discovers the available instance groups for the selected EMR cluster.
-        Note that instance group and instance fleet are both treated the same here.
+    Note that instance group and instance fleet are both treated the same here.
 
-        Returns the list of instances in the selected group, as well as the group name
+    Returns the list of instances in the selected group, as well as the group name
     """
     # Discover the available instances grouped by groupname
     with click_spinner.spinner():
@@ -77,10 +77,7 @@ def does_cluster_have_applications(
     if not cluster_details:
         return False
 
-    cluster_applications = {
-        a.get("Name"): a.get("Version")
-        for a in cluster_details.get("Applications", [])
-    }
+    cluster_applications = {a.get("Name"): a.get("Version") for a in cluster_details.get("Applications", [])}
     if isinstance(applications, MutableMapping):
         # If a map, check that all the required applications are in the cluster and at the version
         return all(v == cluster_applications.get(k) for k, v in applications.items())
@@ -96,7 +93,7 @@ def get_emr_clusters(
 ) -> dict[str, tuple[str, str]]:
     """Discover the available EMR cluster
 
-        Returns a dict where the key is the cluster "Name - ID - CreatedDT" and the value is the ID.
+    Returns a dict where the key is the cluster "Name - ID - CreatedDT" and the value is the ID.
     """
     if states is None:
         states = ["RUNNING", "WAITING"]
@@ -106,23 +103,22 @@ def get_emr_clusters(
     ).get("Clusters", [])
 
     if applications:
-        clusters = [
-            c for c in clusters
-            if does_cluster_have_applications(emr, c.get("Id"), applications=applications)
-        ]
+        clusters = [c for c in clusters if does_cluster_have_applications(emr, c.get("Id"), applications=applications)]
 
     def get_display_name(c: "ClusterSummaryTypeDef") -> str:
-        created = c.get("Status", {}).get(
-            "Timeline", {},
-        ).get("CreationDateTime")
+        created = (
+            c.get("Status", {})
+            .get(
+                "Timeline",
+                {},
+            )
+            .get("CreationDateTime")
+        )
         if created:
             created = created.strftime("%Y-%m-%d %H:%M")
         return f"{c.get('Name')} - {c.get('Id')} - {created}"
 
-    return {
-        f"{get_display_name(c)}": (c.get("Id", ""), c.get("Name", ""))
-        for c in clusters
-    }
+    return {f"{get_display_name(c)}": (c.get("Id", ""), c.get("Name", "")) for c in clusters}
 
 
 def get_emr_groups(
@@ -131,7 +127,7 @@ def get_emr_groups(
 ) -> tuple[list["InstanceFleetTypeDef"] | list["InstanceGroupTypeDef"], Literal['InstanceFleetId', 'InstanceGroupId']]:
     """Discover the EMR groups.
 
-        Returns the groups and the id_name to use for list_instances
+    Returns the groups and the id_name to use for list_instances
     """
     cluster_details = emr.describe_cluster(ClusterId=cluster_id)
     instance_collection_type = cluster_details["Cluster"].get(
@@ -167,7 +163,8 @@ def get_emr_instances(
     grouped_instances = {g: [] for g in groups.values()}
 
     instances = emr.list_instances(
-        ClusterId=cluster_id, InstanceStates=["RUNNING"],
+        ClusterId=cluster_id,
+        InstanceStates=["RUNNING"],
     )
     for instance in instances["Instances"]:
         grouped_instances[groups[instance.get(id_name, "")]].append(instance)
@@ -181,9 +178,6 @@ def get_emr_instance_ips(
 ) -> dict[str, list[IP]]:
     '''Returns a dict of IPs per group'''
     return {
-        k: [
-            IP(x.get("PrivateIpAddress"), x.get("PublicIpAddress"))
-            for x in v
-        ]
+        k: [IP(x.get("PrivateIpAddress"), x.get("PublicIpAddress")) for x in v]
         for k, v in get_emr_instances(emr, cluster_id).items()
     }

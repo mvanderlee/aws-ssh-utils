@@ -329,7 +329,7 @@ class SSHShell:
         self._close()
 
     def _open(self) -> paramiko.Channel:
-        logger.info(f'Opening SSH: ssh -i {self.key_filename} {self.username}@{self.hostname}')
+        logger.info(f'Opening SSH: ssh -o "IdentitiesOnly=yes" -i {self.key_filename} {self.username}@{self.hostname}')
 
         terminal_size = os.get_terminal_size()
 
@@ -343,6 +343,7 @@ class SSHShell:
                 hostname=self.hostname,
                 username=self.username,
                 pkey=self.private_key,
+                allow_agent=False,
             )
         except paramiko.BadHostKeyException as e:
             error_message = f'''

@@ -26,26 +26,108 @@ import paramiko
 from loguru import logger
 
 # https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h2-Bracketed-Paste-Mode
-START_PASTE = "\x1B\x5B\x32\x30\x30\x7E"  # ESC[200~
-END_PASTE = "\x1B\x5B\x32\x30\x31\x7E"  # ESC[201~
+START_PASTE = "\x1b\x5b\x32\x30\x30\x7e"  # ESC[200~
+END_PASTE = "\x1b\x5b\x32\x30\x31\x7e"  # ESC[201~
 
 
 ALL_CODECS = [
-    'ascii', 'big5', 'big5hkscs', 'cp037', 'cp273', 'cp424', 'cp437',
-    'cp500', 'cp720', 'cp737', 'cp775', 'cp850', 'cp852', 'cp855', 'cp856', 'cp857',
-    'cp858', 'cp860', 'cp861', 'cp862', 'cp863', 'cp864', 'cp865', 'cp866', 'cp869',
-    'cp874', 'cp875', 'cp932', 'cp949', 'cp950', 'cp1006', 'cp1026', 'cp1125',
-    'cp1140', 'cp1250', 'cp1251', 'cp1252', 'cp1253', 'cp1254', 'cp1255', 'cp1256',
-    'cp1257', 'cp1258', 'euc_jp', 'euc_jis_2004', 'euc_jisx0213', 'euc_kr',
-    'gb2312', 'gbk', 'gb18030', 'hz', 'iso2022_jp', 'iso2022_jp_1', 'iso2022_jp_2',
-    'iso2022_jp_2004', 'iso2022_jp_3', 'iso2022_jp_ext', 'iso2022_kr', 'latin_1',
-    'iso8859_2', 'iso8859_3', 'iso8859_4', 'iso8859_5', 'iso8859_6', 'iso8859_7',
-    'iso8859_8', 'iso8859_9', 'iso8859_10', 'iso8859_11', 'iso8859_13',
-    'iso8859_14', 'iso8859_15', 'iso8859_16', 'johab', 'koi8_r', 'koi8_t', 'koi8_u',
-    'kz1048', 'mac_cyrillic', 'mac_greek', 'mac_iceland', 'mac_latin2', 'mac_roman',
-    'mac_turkish', 'ptcp154', 'shift_jis', 'shift_jis_2004', 'shift_jisx0213',
-    'utf_32', 'utf_32_be', 'utf_32_le', 'utf_16', 'utf_16_be', 'utf_16_le', 'utf_7',
-    'utf_8', 'utf_8_sig',
+    'ascii',
+    'big5',
+    'big5hkscs',
+    'cp037',
+    'cp273',
+    'cp424',
+    'cp437',
+    'cp500',
+    'cp720',
+    'cp737',
+    'cp775',
+    'cp850',
+    'cp852',
+    'cp855',
+    'cp856',
+    'cp857',
+    'cp858',
+    'cp860',
+    'cp861',
+    'cp862',
+    'cp863',
+    'cp864',
+    'cp865',
+    'cp866',
+    'cp869',
+    'cp874',
+    'cp875',
+    'cp932',
+    'cp949',
+    'cp950',
+    'cp1006',
+    'cp1026',
+    'cp1125',
+    'cp1140',
+    'cp1250',
+    'cp1251',
+    'cp1252',
+    'cp1253',
+    'cp1254',
+    'cp1255',
+    'cp1256',
+    'cp1257',
+    'cp1258',
+    'euc_jp',
+    'euc_jis_2004',
+    'euc_jisx0213',
+    'euc_kr',
+    'gb2312',
+    'gbk',
+    'gb18030',
+    'hz',
+    'iso2022_jp',
+    'iso2022_jp_1',
+    'iso2022_jp_2',
+    'iso2022_jp_2004',
+    'iso2022_jp_3',
+    'iso2022_jp_ext',
+    'iso2022_kr',
+    'latin_1',
+    'iso8859_2',
+    'iso8859_3',
+    'iso8859_4',
+    'iso8859_5',
+    'iso8859_6',
+    'iso8859_7',
+    'iso8859_8',
+    'iso8859_9',
+    'iso8859_10',
+    'iso8859_11',
+    'iso8859_13',
+    'iso8859_14',
+    'iso8859_15',
+    'iso8859_16',
+    'johab',
+    'koi8_r',
+    'koi8_t',
+    'koi8_u',
+    'kz1048',
+    'mac_cyrillic',
+    'mac_greek',
+    'mac_iceland',
+    'mac_latin2',
+    'mac_roman',
+    'mac_turkish',
+    'ptcp154',
+    'shift_jis',
+    'shift_jis_2004',
+    'shift_jisx0213',
+    'utf_32',
+    'utf_32_be',
+    'utf_32_le',
+    'utf_16',
+    'utf_16_be',
+    'utf_16_le',
+    'utf_7',
+    'utf_8',
+    'utf_8_sig',
 ]
 
 # windows does not have termios...
@@ -66,8 +148,8 @@ def is_int(val: str) -> bool:
 
 def remove_title_change(data: str) -> str:
     '''
-        Title change is a string starting with '\x1b]0;', and ending with '\x07'.
-        Remove all such substrings
+    Title change is a string starting with '\x1b]0;', and ending with '\x07'.
+    Remove all such substrings
     '''
     while True:
         a = data.find(_TITLE_START)
@@ -76,7 +158,7 @@ def remove_title_change(data: str) -> str:
         if a == -1 or b == -1:
             break
 
-        data = data[:a] + data[b + len(_TITLE_END):]
+        data = data[:a] + data[b + len(_TITLE_END) :]
 
     return data
 
@@ -90,8 +172,8 @@ def interactive_shell(chan: paramiko.Channel, allow_title_changes: bool = True):
 
 def decode(chars: bytes) -> str:
     '''
-        Decodes the bytes and handles encoding errors
-        `htop` scrolling for example uses cp037
+    Decodes the bytes and handles encoding errors
+    `htop` scrolling for example uses cp037
     '''
     try:
         # Attempt to decode the entire input as UTF-8
@@ -110,7 +192,7 @@ def decode(chars: bytes) -> str:
             else:
                 # Failed to decode character, return replacement character.
                 # https://www.fileformat.info/info/unicode/char/fffd/index.htm
-                return '\uFFFD'
+                return '\ufffd'
 
         return ''.join(decode_char(b) for b in chars)
 
@@ -125,18 +207,18 @@ def posix_readkey() -> str:
 
     def read():
         '''
-            Reads one character and handles encoding errors
-            `htop` scrolling for example uses cp037
+        Reads one character and handles encoding errors
+        `htop` scrolling for example uses cp037
         '''
         return decode(sys.stdin.buffer.raw.read(1))  # pyright: ignore[reportAttributeAccessIssue, reportUnknownArgumentType]
 
     c1 = read()
 
-    if c1 != "\x1B":  # ESC
+    if c1 != "\x1b":  # ESC
         return c1
 
     c2 = read()
-    if c2 not in "\x4F\x5B":  # O[
+    if c2 not in "\x4f\x5b":  # O[
         return c1 + c2
 
     c3 = read()

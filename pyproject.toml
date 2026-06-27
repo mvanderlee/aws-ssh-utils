@@ -15,7 +15,6 @@ classifiers = [
     "Intended Audience :: Information Technology",
     "Intended Audience :: System Administrators",
     "Operating System :: OS Independent",
-    "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python",
     "Topic :: Software Development :: Libraries :: Python Modules",
     "Topic :: Software Development :: Libraries",
@@ -27,6 +26,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
 ]
 dependencies = [
   "boto3",
@@ -41,22 +41,19 @@ dependencies = [
 ]
 dynamic = ["version"]
 
+[dependency-groups]
+dev = [
+    "pre-commit>=4.6.0",
+]
+publish = [
+  "hatch >= 1.7.0",
+]
+
 [project.urls]
 Homepage = "https://github.com/mvanderlee/aws-ssh-utils"
 
 [project.scripts]
 aws_ssh = "aws_ssh_utils.ssh:cli"
-
-[project.optional-dependencies]
-
-dev = [
-  "boto3-stubs[ec2,emr]",
-]
-test = [
-]
-publish = [
-  "hatch >= 1.7.0",
-]
 
 [tool.hatch.build]
 include = [
