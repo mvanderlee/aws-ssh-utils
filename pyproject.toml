@@ -32,7 +32,6 @@ dependencies = [
   "boto3",
   "click",
   "click_spinner",
-  "environs",
   "loguru",
   "paramiko",
   "questionary",
@@ -42,6 +41,9 @@ dynamic = ["version"]
 
 [dependency-groups]
 dev = [
+    "boto3-stubs>=1.43.36",
+    "mypy-boto3-ec2>=1.43.35",
+    "mypy-boto3-emr>=1.43.23",
     "pre-commit>=4.6.0",
 ]
 publish = [

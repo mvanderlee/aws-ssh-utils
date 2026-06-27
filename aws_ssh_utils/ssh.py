@@ -17,7 +17,6 @@ import paramiko
 import paramiko.client
 import questionary
 from botocore.exceptions import ClientError
-from environs import Env
 from loguru import logger
 from typing_extensions import override
 
@@ -33,7 +32,6 @@ if TYPE_CHECKING:
     from mypy_boto3_ec2.service_resource import Instance
     from mypy_boto3_emr import EMRClient
 
-Env().read_env()  # Load .env file
 # CSV of issuer,client
 OPKSSH_PROVIDER_TAG = 'opkssh_provider'
 # EMR doesn't support comma's in tags.
@@ -138,17 +136,17 @@ def ec2_ssh(
         ).connect()
     except ShellError as e:
         logger.error(e.message)
-        exit(e.exit_code)
+        sys.exit(e.exit_code)
     except ClientError as e:
         if e.response.get('Error') and e.response.get('Error', {}).get('Code') == 'ExpiredTokenException':
             logger.log(
                 logging.CRITICAL,
                 'Your AWS Token has expired. Please update and try again.',
             )
-            exit(1)
+            sys.exit(1)
         else:
             logger.error(e)
-            exit(1)
+            sys.exit(1)
 
 
 @cli.command('emr')
@@ -210,17 +208,17 @@ def emr_ssh(
 
     except ShellError as e:
         logger.error(e.message)
-        exit(e.exit_code)
+        sys.exit(e.exit_code)
     except ClientError as e:
         if e.response.get('Error') and e.response.get('Error', {}).get('Code') == 'ExpiredTokenException':
             logger.log(
                 logging.CRITICAL,
                 'Your AWS Token has expired. Please update and try again.',
             )
-            exit(1)
+            sys.exit(1)
         else:
             logger.error(e)
-            exit(1)
+            sys.exit(1)
 
 
 @cli.command('emr-all')
@@ -304,17 +302,17 @@ def emr_ssh_all(
 
     except ShellError as e:
         logger.error(e.message)
-        exit(e.exit_code)
+        sys.exit(e.exit_code)
     except ClientError as e:
         if e.response.get('Error') and e.response.get('Error', {}).get('Code') == 'ExpiredTokenException':
             logger.log(
                 logging.CRITICAL,
                 'Your AWS Token has expired. Please update and try again.',
             )
-            exit(1)
+            sys.exit(1)
         else:
             logger.error(e)
-            exit(1)
+            sys.exit(1)
 
 
 @dataclass
@@ -543,7 +541,7 @@ def get_emr_ssh_key_file_for_cluster(
                 f'Could not find the ssh key {key_name}, would you like to continue?',
             ).unsafe_ask()
             if not should_continue:
-                exit(1)
+                sys.exit(1)
 
     return key_file
 
