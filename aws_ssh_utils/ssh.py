@@ -322,7 +322,7 @@ class SSHShell:
     key_filename: str | None = None
     terminal_title: str | None = None
 
-    private_key: paramiko.PKey = field(init=False)
+    private_key: paramiko.PKey | None = field(init=False, default=None)
     _ssh_client: paramiko.SSHClient = field(init=False)
     _channel: paramiko.Channel = field(init=False)
 
@@ -347,7 +347,11 @@ class SSHShell:
         self._close()
 
     def _open(self) -> paramiko.Channel:
-        logger.info(f'Opening SSH: ssh -o "IdentitiesOnly=yes" -i {self.key_filename} {self.username}@{self.hostname}')
+        if self.private_key is not None:
+            logger.info(f'Opening SSH: ssh -o "IdentitiesOnly=yes" -i {self.key_filename} {self.username}@{self.hostname}')
+        else:
+            # No key was found/provided; fall back to the ssh-agent and default keys
+            logger.info(f'Opening SSH: ssh {self.username}@{self.hostname}')
 
         terminal_size = os.get_terminal_size()
 
@@ -361,11 +365,13 @@ class SSHShell:
         ssh_client.load_host_keys(host_key_path)
         ssh_client.set_missing_host_key_policy(ConfirmAddPolicy())
         try:
+            has_key = self.private_key is not None
             ssh_client.connect(
                 hostname=self.hostname,
                 username=self.username,
                 pkey=self.private_key,
-                allow_agent=False,
+                allow_agent=not has_key,
+                look_for_keys=not has_key,
             )
         except paramiko.BadHostKeyException as e:
             error_message = f'''
