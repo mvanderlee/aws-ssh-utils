@@ -146,6 +146,9 @@ def ec2_ssh(
                 'Your AWS Token has expired. Please update and try again.',
             )
             exit(1)
+        else:
+            logger.error(e)
+            exit(1)
 
 
 @cli.command('emr')
@@ -195,7 +198,7 @@ def emr_ssh(
                 )
 
         group_name = emr_instance.group_name.split(' ')[0]
-        postfix = f'[{emr_instance.group_idx}]' or ''
+        postfix = f'[{emr_instance.group_idx}]' if emr_instance.group_idx else ''
         terminal_title = f'{emr_instance.cluster_name} - {group_name}{postfix}'
 
         with SSHShell(hostname=ip, username=user, key_filename=key_file, terminal_title=terminal_title) as shell:
@@ -214,6 +217,9 @@ def emr_ssh(
                 logging.CRITICAL,
                 'Your AWS Token has expired. Please update and try again.',
             )
+            exit(1)
+        else:
+            logger.error(e)
             exit(1)
 
 
@@ -248,7 +254,15 @@ def emr_ssh_all(
         if key_file is None:
             key_file = get_emr_ssh_key_file_for_cluster(emr, cluster_id)
 
-        window_order = ['Master', 'Primary', 'Core', 'Task']
+        window_order = ['master', 'primary', 'core', 'task']
+
+        def window_sort_key(item: tuple[str, list[IP]]) -> tuple[int, str]:
+            name = item[0]
+            try:
+                return window_order.index(name.lower()), name
+            except ValueError:
+                # Unknown/custom group names sort after the known ones
+                return len(window_order), name
 
         def get_ip(ip: IP) -> str | None:
             if private:
@@ -267,9 +281,12 @@ def emr_ssh_all(
                 f'{group_name} - {instance_num}',
                 f'ssh -i {key_file} {user}@{get_ip(instance_ip)} || $SHELL -i',
             )
-            for group_name, instance_ips in sorted(grouped_instances.items(), key=lambda t: window_order.index(t[0]))
+            for group_name, instance_ips in sorted(grouped_instances.items(), key=window_sort_key)
             for instance_num, instance_ip in enumerate(instance_ips, start=1)
         ]
+
+        if not window_cmds:
+            raise ShellError('No running instances found in the selected cluster!')
 
         session_name = cluster_name
         first_window_name, first_cmd = window_cmds[0]
@@ -294,6 +311,9 @@ def emr_ssh_all(
                 logging.CRITICAL,
                 'Your AWS Token has expired. Please update and try again.',
             )
+            exit(1)
+        else:
+            logger.error(e)
             exit(1)
 
 
@@ -336,6 +356,10 @@ class SSHShell:
         ssh_client = paramiko.SSHClient()
         # Set hosts key path so we can save to it
         host_key_path = os.path.expanduser('~/.ssh/known_hosts')
+        # Ensure the file exists; load_host_keys raises if it's missing (e.g. first run)
+        os.makedirs(os.path.dirname(host_key_path), mode=0o700, exist_ok=True)
+        if not os.path.exists(host_key_path):
+            Path(host_key_path).touch()
         ssh_client.load_host_keys(host_key_path)
         ssh_client.set_missing_host_key_policy(ConfirmAddPolicy())
         try:
@@ -437,7 +461,7 @@ def get_ec2_ssh_options(
     key_file: str | None = None,
 ) -> tuple[str, str, str | None, str]:
     instance = prompt_for_ec2_instance(b3s)
-    instance_tags = {tag.get('Key', '').lower(): tag.get('Value', '') for tag in instance.tags}
+    instance_tags = {tag.get('Key', '').lower(): tag.get('Value', '') for tag in instance.tags or []}
 
     if key_file is None:
         # Support https://github.com/openpubkey/opkssh via tags
@@ -553,11 +577,14 @@ def prompt_for_ec2_instance(
     )
 
     with click_spinner.spinner():
-        grouped_by_name = {
-            get_ec2_name(instance): instance
-            for instance in running_instances
-            if not name_contains or name_contains in get_ec2_name(instance).lower()
-        }
+        grouped_by_name: dict[str, Instance] = {}
+        for instance in running_instances:
+            name = get_ec2_name(instance)
+            if name_contains and name_contains not in name.lower():
+                continue
+            # Disambiguate duplicate Name tags (e.g. ASG members) by appending the instance id
+            display = name if name not in grouped_by_name else f'{name} ({instance.instance_id})'
+            grouped_by_name[display] = instance
 
         if not grouped_by_name:
             raise ShellError('No matching EC2 instances found!')
@@ -574,7 +601,7 @@ def prompt_for_ec2_instance(
 
 def get_ec2_name(ec2_instance: "Instance") -> str:
     '''Takes in the boto3 EC2 resource instance object'''
-    for tag in ec2_instance.tags:
+    for tag in ec2_instance.tags or []:
         if tag.get('Key') == 'Name':
             return tag.get('Value', '')
 
@@ -608,15 +635,11 @@ def get_opkssh_key_file(provider: str) -> str:
             "-i",
             str(opkssh_key_file.absolute()),
         ]
-        process = subprocess.Popen(cmd, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE)  # noqa: S603
-        process.wait()
-        if process.returncode != 0:
+        # Inherit stdio so the user sees the login prompt/URL live (and avoid a pipe-buffer deadlock)
+        result = subprocess.run(cmd, shell=False, check=False)  # noqa: S603
+        if result.returncode != 0:
             logger.error('Failed to authenticate using opkssh')
-            if process.stdout:
-                logger.info(process.stdout.read().decode())
-            if process.stderr:
-                logger.error(process.stderr.read().decode())
-            sys.exit(process.returncode)
+            sys.exit(result.returncode)
 
     return str(opkssh_key_file.absolute())
 
