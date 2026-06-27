@@ -32,7 +32,6 @@ dependencies = [
   "boto3",
   "click",
   "click_spinner",
-  "coloredlogs",
   "environs",
   "loguru",
   "paramiko",
