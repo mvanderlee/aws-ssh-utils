@@ -35,11 +35,15 @@ Usage: aws_ssh app [OPTIONS]
   Browse EC2 instances and EMR clusters, and open SSH shells in tabs.
 
 Options:
-  -p, --profile TEXT  Which AWS profile to use
-  -r, --region TEXT   Which AWS region to use
-  --help              Show this message and exit.
+  -p, --profile TEXT          Which AWS profile to use
+  -r, --region TEXT           Which AWS region to use
+  --scrollback INTEGER RANGE  Lines of scrollback per shell. Defaults to your
+                              tmux or Windows Terminal setting, else 1000.
+                              [x>=0]
+  --help                      Show this message and exit.
 ```
 
+Scroll back with the mouse wheel or `shift+PgUp`/`shift+PgDn`; typing jumps back to the prompt.
 `F12` shows/hides the sidebar, `ctrl+w` closes a failed tab, `ctrl+q` quits. Every other key goes to the focused shell.
 Logs are viewable with `textual console`.
 
@@ -59,7 +63,10 @@ Options:
   -r, --region TEXT     Which AWS region to use
   -u, --user TEXT       Which user to connect as
   --private / --public  Connect to the instance's private or public IP
-  -k, --key-file TEXT   Which key file to use to connect
+  -k, --key-file FILE   Which key file to use to connect
+  --scrollback INTEGER RANGE
+                        Lines of scrollback per shell. Defaults to your tmux or
+                        Windows Terminal setting, else 1000.  [x>=0]
   --help                Show this message and exit.
 ```
 
@@ -78,7 +85,10 @@ Options:
   -r, --region TEXT     Which AWS region to use
   -u, --user TEXT       Which user to connect as
   --private / --public  Connect to the instance's private or public IP
-  -k, --key-file TEXT   Which key file to use to connect
+  -k, --key-file FILE   Which key file to use to connect
+  --scrollback INTEGER RANGE
+                        Lines of scrollback per shell. Defaults to your tmux or
+                        Windows Terminal setting, else 1000.  [x>=0]
   --help                Show this message and exit.
 ```
 
@@ -99,6 +109,6 @@ Options:
   -r, --region TEXT     Which AWS region to use
   -u, --user TEXT       Which user to connect as
   --private / --public  Connect to the instance's private or public IP
-  -k, --key-file TEXT   Which key file to use to connect
+  -k, --key-file FILE   Which key file to use to connect
   --help                Show this message and exit.
 ```

@@ -1,15 +1,25 @@
-"""Textual widget rendering a paramiko shell channel through the pyte VT100 emulator."""
+"""Textual widgets rendering a paramiko shell channel through the pyte VT100 emulator."""
 
+import datetime as dt
+import time
+from collections import deque
+from collections.abc import Sequence
 from functools import lru_cache
+from typing import Any
 
 import paramiko
 import pyte
+from pyte.screens import Char, Margins
 from rich.segment import Segment
 from rich.style import Style
+from rich.text import Text
 from textual import events, work
+from textual.app import App, ComposeResult
+from textual.containers import Horizontal
 from textual.message import Message
 from textual.strip import Strip
 from textual.widget import Widget
+from textual.widgets import Static
 from typing_extensions import override
 
 KEYS = {
@@ -41,6 +51,11 @@ KEYS = {
     'f11': '\x1b[23~',
     'f12': '\x1b[24~',
 }
+SCROLL_KEYS = {'shift+pageup': 1, 'shift+pagedown': -1}
+"""Pages to scroll back per key press."""
+WHEEL_LINES = 3
+ERASE_SCROLLBACK = 3
+"""`CSI 3 J`, sent by e.g. `clear`."""
 # pyte stores private (DEC) modes shifted by 5 bits
 APPLICATION_CURSOR = 1 << 5
 BRACKETED_PASTE = 2004 << 5
@@ -91,15 +106,33 @@ def cell_style(
 
 
 class ChannelScreen(pyte.Screen):
-    """Answers terminal queries, such as cursor position reports, over the channel."""
+    """Answers terminal queries over the channel, and keeps the lines scrolled off the top as history."""
 
-    def __init__(self, channel: paramiko.Channel, columns: int, lines: int):
+    def __init__(self, channel: paramiko.Channel, columns: int, lines: int, scrollback: int = 0):
         super().__init__(columns, lines)
         self.channel = channel
+        self.history: deque[tuple[Char, ...]] = deque(maxlen=scrollback)
+        # Interned so history lines share Char objects instead of each holding a dict of its own.
+        self._chars: dict[Char, Char] = {}
 
     @override
     def write_process_input(self, data: str):
         self.channel.send(data.encode())
+
+    @override
+    def index(self):
+        top, bottom = self.margins or Margins(0, self.lines - 1)
+        # Only full-screen scrolls; lines leaving a scroll region (e.g. below a status line) aren't history.
+        if self.history.maxlen and top == 0 and self.cursor.y == bottom:
+            row = self.buffer[top]
+            self.history.append(tuple(self._chars.setdefault(row[x], row[x]) for x in range(self.columns)))
+        super().index()
+
+    @override
+    def erase_in_display(self, how: int = 0, *args: Any, **kwargs: Any):
+        if how == ERASE_SCROLLBACK:
+            self.history.clear()
+        super().erase_in_display(how, *args, **kwargs)
 
 
 class Terminal(Widget, can_focus=True):
@@ -112,12 +145,14 @@ class Terminal(Widget, can_focus=True):
     class Closed(Message):
         pass
 
-    def __init__(self, client: paramiko.SSHClient, channel: paramiko.Channel, **kwargs: object):
+    def __init__(self, client: paramiko.SSHClient, channel: paramiko.Channel, scrollback: int = 0, **kwargs: object):
         super().__init__(**kwargs)  # pyright: ignore[reportArgumentType]
         self.client = client
         self.channel = channel
-        self.vt = ChannelScreen(channel, 80, 24)
+        self.vt = ChannelScreen(channel, 80, 24, scrollback)
         self.stream = pyte.ByteStream(self.vt)
+        self.scrolled = 0
+        """How many history lines the view is scrolled back."""
 
     def on_mount(self):
         self.read_channel()
@@ -136,8 +171,25 @@ class Terminal(Widget, can_focus=True):
         self.post_message(self.Closed())
 
     def feed(self, data: bytes):
+        history_size = len(self.vt.history)
         self.stream.feed(data)
+        if self.scrolled:
+            # Keep a scrolled back view still while output arrives.
+            # ponytail: drifts once history is full, as the deque then drops a line per new one.
+            self.scroll_history(len(self.vt.history) - history_size)
         self.refresh()
+
+    def scroll_history(self, lines: int):
+        self.scrolled = max(0, min(self.scrolled + lines, len(self.vt.history)))
+        self.refresh()
+
+    def on_mouse_scroll_up(self, event: events.MouseScrollUp):
+        event.stop()
+        self.scroll_history(WHEEL_LINES)
+
+    def on_mouse_scroll_down(self, event: events.MouseScrollDown):
+        event.stop()
+        self.scroll_history(-WHEEL_LINES)
 
     def on_resize(self, event: events.Resize):
         width, height = event.size.width, event.size.height
@@ -146,16 +198,28 @@ class Terminal(Widget, can_focus=True):
             self.channel.resize_pty(width=width, height=height)
 
     def on_key(self, event: events.Key):
+        if event.key in SCROLL_KEYS:
+            event.stop()
+            event.prevent_default()
+            self.scroll_history(SCROLL_KEYS[event.key] * (self.vt.lines - 1))
+            return
+
         data = key_to_input(event.key, event.character, app_cursor=APPLICATION_CURSOR in self.vt.mode)
         if data:
             event.stop()
             event.prevent_default()
-            self.channel.send(data.encode())
+            self.send(data)
 
     def on_paste(self, event: events.Paste):
         text = event.text
         if BRACKETED_PASTE in self.vt.mode:
             text = f'\x1b[200~{text}\x1b[201~'
+        self.send(text)
+
+    def send(self, text: str):
+        """Send user input, jumping back to the live screen like other terminals do."""
+        if self.scrolled:
+            self.scroll_history(-self.scrolled)
         self.channel.send(text.encode())
 
     @override
@@ -164,13 +228,75 @@ class Terminal(Widget, can_focus=True):
         if y >= vt.lines:
             return Strip.blank(self.size.width)
 
-        row = vt.buffer[y]
-        cursor_x = vt.cursor.x if self.has_focus and not vt.cursor.hidden and y == vt.cursor.y else -1
+        index = len(vt.history) - self.scrolled + y
+        if index < len(vt.history):
+            line = vt.history[index]
+            row: Sequence[Char] = [line[x] if x < len(line) else vt.default_char for x in range(vt.columns)]
+            cursor_x = -1
+        else:
+            y = index - len(vt.history)
+            buffer_row = vt.buffer[y]
+            row = [buffer_row[x] for x in range(vt.columns)]
+            cursor_x = vt.cursor.x if self.has_focus and not vt.cursor.hidden and y == vt.cursor.y else -1
+
         segments = []
-        for x in range(vt.columns):
-            char = row[x]
+        for x, char in enumerate(row):
             style = cell_style(*char[1:8])
             if x == cursor_x:
                 style += Style(reverse=not char.reverse)
             segments.append(Segment(char.data, style))
         return Strip(segments).simplify()
+
+
+class ShellStatus(Horizontal):
+    """How and when the shell connected, and for how long."""
+
+    DEFAULT_CSS = """
+    ShellStatus {
+        height: 1;
+        padding: 0 1;
+        background: $surface;
+        & > .via { width: 1fr; }
+        & > .duration { width: auto; }
+    }
+    """
+
+    def __init__(self, via: str):
+        super().__init__()
+        self.via = via
+        self.started = time.monotonic()
+
+    def compose(self) -> ComposeResult:
+        connected_at = dt.datetime.now().isoformat(sep=' ', timespec='seconds')
+        yield Static(Text(f"Connected via {self.via} at {connected_at}"), classes='via')
+        yield Static(classes='duration')
+
+    def on_mount(self):
+        self.tick()
+        self.set_interval(1, self.tick)
+
+    def tick(self):
+        minutes, seconds = divmod(int(time.monotonic() - self.started), 60)
+        hours, minutes = divmod(minutes, 60)
+        self.query_one('.duration', Static).update(f"{hours:02}:{minutes:02}:{seconds:02}")
+
+
+class ShellApp(App[None]):
+    """A single full-screen shell, exits when the shell closes."""
+
+    # Its priority ctrl+p binding would steal shell history navigation from the terminal.
+    ENABLE_COMMAND_PALETTE = False
+
+    def __init__(self, via: str, client: paramiko.SSHClient, channel: paramiko.Channel, scrollback: int = 0):
+        super().__init__()
+        self.via = via
+        self.client = client
+        self.channel = channel
+        self.scrollback = scrollback
+
+    def compose(self) -> ComposeResult:
+        yield ShellStatus(self.via)
+        yield Terminal(self.client, self.channel, self.scrollback)
+
+    def on_terminal_closed(self):
+        self.exit()

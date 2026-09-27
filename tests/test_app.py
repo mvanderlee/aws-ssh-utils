@@ -5,9 +5,9 @@ from click.testing import CliRunner
 
 from aws_ssh_utils import connection
 from aws_ssh_utils.commands.app import app as app_command
-from aws_ssh_utils.commands.app import group_role, group_sort_key
 from aws_ssh_utils.commands.healthcheck import healthcheck
 from aws_ssh_utils.connection import Connection, Environment, Target, connect
+from aws_ssh_utils.emr_utils import group_role, group_sort_key
 from aws_ssh_utils.ssh import cli
 from aws_ssh_utils.terminal import key_to_input, pyte_color
 
@@ -60,7 +60,7 @@ def test_connect_stops_at_first_success_and_reports_missing_tools():
     ):
         assert connect(TARGET, env, on_output=lambda _: None, on_waiting=lambda: None) == Connection(client, 'my-key')
 
-    open_ssh.assert_called_once_with('10.0.0.1', 'ec2-user', ['/k/my-key.pem'], use_defaults=False)
+    open_ssh.assert_called_once_with('10.0.0.1', 'ec2-user', ['/k/my-key.pem'], use_defaults=False, confirm_host_key=None)
 
 
 @pytest.mark.parametrize(
@@ -101,10 +101,14 @@ def test_emr_groups_sort_master_core_task():
 @pytest.mark.parametrize(
     ('args', 'expected_params'),
     [
-        pytest.param([], {'profile': None, 'region': None}, id='no-args'),
-        pytest.param(['--verbose'], {'profile': None, 'region': None}, id='group-flag-only'),
-        pytest.param(['-p', 'prod', '-r', 'eu-west-1'], {'profile': 'prod', 'region': 'eu-west-1'}, id='app-options'),
-        pytest.param(['--quiet', 'app', '-p', 'prod'], {'profile': 'prod', 'region': None}, id='explicit'),
+        pytest.param([], {'profile': None, 'region': None, 'scrollback': None}, id='no-args'),
+        pytest.param(['--verbose'], {'profile': None, 'region': None, 'scrollback': None}, id='group-flag-only'),
+        pytest.param(
+            ['-p', 'prod', '-r', 'eu-west-1', '--scrollback', '50'],
+            {'profile': 'prod', 'region': 'eu-west-1', 'scrollback': 50},
+            id='app-options',
+        ),
+        pytest.param(['--quiet', 'app', '-p', 'prod'], {'profile': 'prod', 'region': None, 'scrollback': None}, id='explicit'),
     ],
 )
 def test_app_is_the_default_command(args, expected_params):

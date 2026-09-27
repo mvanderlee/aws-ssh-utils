@@ -31,7 +31,6 @@ classifiers = [
 dependencies = [
   "boto3",
   "click",
-  "click_spinner",
   "loguru",
   "paramiko",
   "pyte>=0.8.2",

@@ -1,10 +1,8 @@
-import datetime as dt
 import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from itertools import count
-from shutil import which
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
 import boto3
@@ -24,10 +22,11 @@ from textual.widgets import Footer, Input, OptionList, RichLog, Static, TabbedCo
 from textual.widgets.option_list import Option
 from textual.widgets.tree import TreeNode
 
-from aws_ssh_utils.commands.healthcheck import is_aws_ssm_installed, is_opkssh_installed
-from aws_ssh_utils.connection import Environment, Target, connect, opkssh_provider
-from aws_ssh_utils.emr_utils import get_emr_clusters, get_emr_instances
-from aws_ssh_utils.terminal import Terminal
+from aws_ssh_utils.cli_utils import detect_environment, detect_scrollback, scrollback_option
+from aws_ssh_utils.connection import Environment, Target, connect, open_shell_channel
+from aws_ssh_utils.ec2_utils import ec2_name, ec2_target, get_running_ec2_instances
+from aws_ssh_utils.emr_utils import emr_target, get_emr_clusters, get_emr_instances, group_role, group_sort_key
+from aws_ssh_utils.terminal import ShellStatus, Terminal
 
 if TYPE_CHECKING:
     from mypy_boto3_ec2 import EC2Client
@@ -41,15 +40,14 @@ STATUS_ICONS: dict[Status, Text] = {
     'connected': Text('●', style='green'),
     'failed': Text('●', style='red'),
 }
-GROUP_ROLES = (('master', 'M'), ('primary', 'M'), ('core', 'C'), ('task', 'T'))
-EMR_USER = 'hadoop'
 ANIMATION_INTERVAL = 1 / 12
 
 
 @click.command("app")
 @click.option('-p', '--profile', default=None, help='Which AWS profile to use')
 @click.option('-r', '--region', default=None, help='Which AWS region to use')
-def app(profile: str | None = None, region: str | None = None, **kwargs: Any):
+@scrollback_option
+def app(profile: str | None = None, region: str | None = None, scrollback: int | None = None, **kwargs: Any):
     """Browse EC2 instances and EMR clusters, and open SSH shells in tabs."""
     try:
         session = boto3.Session(profile_name=profile, region_name=region)
@@ -62,56 +60,9 @@ def app(profile: str | None = None, region: str | None = None, **kwargs: Any):
     logger.remove()
     logger.add(TextualHandler(), format="{message}")
 
-    env = Environment(
-        ssm_installed=is_aws_ssm_installed() and which('aws') is not None,
-        opkssh_installed=is_opkssh_installed(),
-        profile=profile,
-        region=session.region_name,
-    )
-    SSHApp(session.client('ec2'), session.client('emr'), env).run()
-
-
-def group_role(group_name: str) -> str:
-    """M, C or T for EMR master/primary, core and task groups."""
-    name = group_name.lower()
-    return next((role for prefix, role in GROUP_ROLES if name.startswith(prefix)), group_name[:1].upper())
-
-
-def group_sort_key(group_name: str) -> tuple[int, str]:
-    name = group_name.lower()
-    rank = next((i for i, (prefix, _) in enumerate(GROUP_ROLES) if name.startswith(prefix)), len(GROUP_ROLES))
-    return rank, group_name
-
-
-def ec2_name(instance: "EC2InstanceTypeDef") -> str:
-    return next((t.get('Value', '') for t in instance.get('Tags', []) if t.get('Key') == 'Name'), instance.get('InstanceId', ''))
-
-
-def ec2_target(ec2: "EC2Client", instance: "EC2InstanceTypeDef") -> Target:
-    image_id = instance.get('ImageId')
-    images = ec2.describe_images(ImageIds=[image_id]).get('Images', []) if image_id else []
-    image_name = images[0].get('Name', '') if images else ''
-    tags = {t.get('Key', '').lower(): t.get('Value', '') for t in instance.get('Tags', [])}
-    return Target(
-        instance_id=instance.get('InstanceId', ''),
-        ip=instance.get('PrivateIpAddress', ''),
-        user='ubuntu' if 'ubuntu' in image_name.lower() else 'ec2-user',
-        aliases=(ec2_name(instance),),
-        key_name=instance.get('KeyName'),
-        opkssh_provider=opkssh_provider(tags),
-    )
-
-
-def emr_target(emr: "EMRClient", cluster_id: str, instance: "EMRInstanceTypeDef") -> Target:
-    cluster = emr.describe_cluster(ClusterId=cluster_id)['Cluster']
-    tags = {t.get('Key', '').lower(): t.get('Value', '') for t in cluster.get('Tags', [])}
-    return Target(
-        instance_id=instance.get('Ec2InstanceId', ''),
-        ip=instance.get('PrivateIpAddress', ''),
-        user=EMR_USER,
-        key_name=cluster.get('Ec2InstanceAttributes', {}).get('Ec2KeyName'),
-        opkssh_provider=opkssh_provider(tags),
-    )
+    env = detect_environment(profile, session.region_name)
+    scrollback = detect_scrollback() if scrollback is None else scrollback
+    SSHApp(session.client('ec2'), session.client('emr'), env, scrollback).run()
 
 
 def muted_label(name: str, instance_id: str) -> Text:
@@ -137,47 +88,15 @@ class BouncingBall(Static):
         self.set_interval(ANIMATION_INTERVAL, lambda: self.update(spinner.render(time.monotonic())))
 
 
-class ShellStatus(Horizontal):
-    """How and when the shell connected, and for how long."""
-
-    DEFAULT_CSS = """
-    ShellStatus {
-        height: 1;
-        padding: 0 1;
-        background: $surface;
-        & > .via { width: 1fr; }
-        & > .duration { width: auto; }
-    }
-    """
-
-    def __init__(self, via: str):
-        super().__init__()
-        self.via = via
-        self.started = time.monotonic()
-
-    def compose(self) -> ComposeResult:
-        connected_at = dt.datetime.now().isoformat(sep=' ', timespec='seconds')
-        yield Static(Text(f"Connected via {self.via} at {connected_at}"), classes='via')
-        yield Static(classes='duration')
-
-    def on_mount(self):
-        self.tick()
-        self.set_interval(1, self.tick)
-
-    def tick(self):
-        minutes, seconds = divmod(int(time.monotonic() - self.started), 60)
-        hours, minutes = divmod(minutes, 60)
-        self.query_one('.duration', Static).update(f"{hours:02}:{minutes:02}:{seconds:02}")
-
-
 class ShellPane(TabPane):
     """Connects in the background, then swaps its log for a Terminal."""
 
-    def __init__(self, title: str, resolve: Callable[[], Target], env: Environment, **kwargs: Any):
+    def __init__(self, title: str, resolve: Callable[[], Target], env: Environment, scrollback: int, **kwargs: Any):
         super().__init__(title, **kwargs)
         self.title_ = title
         self.resolve = resolve
         self.env = env
+        self.scrollback = scrollback
         self.status: Status = 'connecting'
         self.spinner = Spinner('dots')
 
@@ -219,16 +138,14 @@ class ShellPane(TabPane):
                 self.app.call_from_thread(self.set_status, 'failed')
                 return
 
-            channel = result.client.get_transport().open_session()  # pyright: ignore[reportOptionalMemberAccess]
-            channel.get_pty(term='xterm-256color')
-            channel.invoke_shell()
+            channel = open_shell_channel(result.client)
         except Exception as e:
             logger.exception("Connection failed")
             self.app.call_from_thread(self.write, f"[red]✗ {escape(str(e) or type(e).__name__)}[/]")
             self.app.call_from_thread(self.set_status, 'failed')
             return
 
-        self.app.call_from_thread(self.attach, result.via, Terminal(result.client, channel))
+        self.app.call_from_thread(self.attach, result.via, Terminal(result.client, channel, self.scrollback))
 
     async def attach(self, via: str, terminal: Terminal):
         await self.query_one(RichLog).remove()
@@ -265,11 +182,12 @@ class SSHApp(App[None]):
         Binding('ctrl+w', 'close_tab', 'Close tab'),
     ]
 
-    def __init__(self, ec2: "EC2Client", emr: "EMRClient", env: Environment):
+    def __init__(self, ec2: "EC2Client", emr: "EMRClient", env: Environment, scrollback: int):
         super().__init__()
         self.ec2 = ec2
         self.emr = emr
         self.env = env
+        self.scrollback = scrollback
         self.ec2_instances: list[EC2InstanceTypeDef] = []
         self.clusters: list[Cluster] = []
         self.cluster_instances: dict[str, dict[str, list[EMRInstanceTypeDef]]] = {}
@@ -329,7 +247,7 @@ class SSHApp(App[None]):
 
     def open_shell(self, title: str, resolve: Callable[[], Target]):
         shells = self.query_one('#shells', TabbedContent)
-        pane = ShellPane(title, resolve, self.env, id=f'shell-{next(self.pane_ids)}')
+        pane = ShellPane(title, resolve, self.env, self.scrollback, id=f'shell-{next(self.pane_ids)}')
         shells.add_pane(pane)
         shells.active = pane.id or ''
 
@@ -337,10 +255,7 @@ class SSHApp(App[None]):
     @work(thread=True, exit_on_error=False)
     def load_ec2(self):
         try:
-            pages = self.ec2.get_paginator('describe_instances').paginate(
-                Filters=[{'Name': 'instance-state-name', 'Values': ['running']}],
-            )
-            instances = [i for page in pages for r in page['Reservations'] for i in r.get('Instances', [])]
+            instances = get_running_ec2_instances(self.ec2)
         except (BotoCoreError, ClientError) as e:
             self.call_from_thread(self.show_error, 'ec2', e)
             return
@@ -436,6 +351,14 @@ class SSHApp(App[None]):
         selected = event.node.data
         if isinstance(selected, EMRNode):
             title = f"{group_role(selected.group_name)} {selected.instance.get('PrivateIpAddress', '')}"
-            self.open_shell(title, lambda: emr_target(self.emr, selected.cluster_id, selected.instance))
+            self.open_shell(
+                title,
+                lambda: emr_target(
+                    self.emr,
+                    selected.cluster_id,
+                    selected.instance.get('Ec2InstanceId', ''),
+                    selected.instance.get('PrivateIpAddress', ''),
+                ),
+            )
 
     # endregion - EMR

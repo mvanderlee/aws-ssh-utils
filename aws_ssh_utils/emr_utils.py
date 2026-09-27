@@ -2,8 +2,10 @@ from collections.abc import MutableMapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
-import click_spinner
 import questionary
+
+from aws_ssh_utils.cli_utils import spinner
+from aws_ssh_utils.connection import Target, opkssh_provider
 
 if TYPE_CHECKING:
     from mypy_boto3_emr import EMRClient
@@ -11,10 +13,15 @@ if TYPE_CHECKING:
     from mypy_boto3_emr.type_defs import ClusterSummaryTypeDef, InstanceFleetTypeDef, InstanceGroupTypeDef, InstanceTypeDef
 
 
+EMR_USER = 'hadoop'
+GROUP_ROLES = (('master', 'M'), ('primary', 'M'), ('core', 'C'), ('task', 'T'))
+
+
 @dataclass
 class IP:
     private: str | None = None
     public: str | None = None
+    instance_id: str | None = None
 
 
 def prompt_for_emr_cluster(
@@ -28,7 +35,7 @@ def prompt_for_emr_cluster(
     Returns the cluster id of the cluster that the user selected.
     """
     # Discover available clusters
-    with click_spinner.spinner():
+    with spinner():
         clusters = get_emr_clusters(emr, applications=applications)
 
     # Prompt the user
@@ -52,7 +59,7 @@ def prompt_for_emr_instance_group(
     Returns the list of instances in the selected group, as well as the group name
     """
     # Discover the available instances grouped by groupname
-    with click_spinner.spinner():
+    with spinner():
         grouped_instances = get_emr_instance_ips(emr, cluster_id)
 
     # Prompt the user
@@ -178,6 +185,31 @@ def get_emr_instance_ips(
 ) -> dict[str, list[IP]]:
     '''Returns a dict of IPs per group'''
     return {
-        k: [IP(x.get("PrivateIpAddress"), x.get("PublicIpAddress")) for x in v]
+        k: [IP(x.get("PrivateIpAddress"), x.get("PublicIpAddress"), x.get("Ec2InstanceId")) for x in v]
         for k, v in get_emr_instances(emr, cluster_id).items()
     }
+
+
+def group_role(group_name: str) -> str:
+    """M, C or T for EMR master/primary, core and task groups."""
+    name = group_name.lower()
+    return next((role for prefix, role in GROUP_ROLES if name.startswith(prefix)), group_name[:1].upper())
+
+
+def group_sort_key(group_name: str) -> tuple[int, str]:
+    """Orders master/primary, core, task, then any other groups."""
+    name = group_name.lower()
+    rank = next((i for i, (prefix, _) in enumerate(GROUP_ROLES) if name.startswith(prefix)), len(GROUP_ROLES))
+    return rank, group_name
+
+
+def get_emr_cluster_keys(emr: "EMRClient", cluster_id: str) -> tuple[str | None, str | None]:
+    """Returns the cluster's EC2 key name and opkssh provider."""
+    cluster = emr.describe_cluster(ClusterId=cluster_id)['Cluster']
+    tags = {t.get('Key', '').lower(): t.get('Value', '') for t in cluster.get('Tags', [])}
+    return cluster.get('Ec2InstanceAttributes', {}).get('Ec2KeyName'), opkssh_provider(tags)
+
+
+def emr_target(emr: "EMRClient", cluster_id: str, instance_id: str, ip: str) -> Target:
+    key_name, provider = get_emr_cluster_keys(emr, cluster_id)
+    return Target(instance_id=instance_id, ip=ip, user=EMR_USER, key_name=key_name, opkssh_provider=provider)

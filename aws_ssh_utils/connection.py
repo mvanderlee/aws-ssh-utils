@@ -9,6 +9,7 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from fnmatch import fnmatch
+from functools import partial
 from hashlib import sha256
 from pathlib import Path
 from typing import IO, cast
@@ -27,6 +28,7 @@ CONNECT_TIMEOUT = 15
 SSH_DIR = Path.home() / '.ssh'
 
 OnOutput = Callable[[str], None]
+ConfirmHostKey = Callable[[str, paramiko.PKey], bool]
 
 
 @dataclass(frozen=True)
@@ -37,6 +39,8 @@ class Target:
     aliases: tuple[str, ...] = ()
     """Extra names to look up in ~/.ssh/config, e.g. the EC2 Name tag."""
     key_name: str | None = None
+    key_file: str | None = None
+    """Explicit key file, used instead of looking up `key_name` in ~/.ssh."""
     opkssh_provider: str | None = None
 
 
@@ -60,6 +64,7 @@ def connect(
     env: Environment,
     on_output: OnOutput,
     on_waiting: Callable[[], None],
+    confirm_host_key: ConfirmHostKey | None = None,
 ) -> Connection | list[str]:
     """Return the first successful connection, or the failure checklist.
 
@@ -67,12 +72,16 @@ def connect(
     1. ~/.ssh/config, when a Host pattern (other than `*`) matches the instance id, an alias or the IP.
     2. SSH over AWS SSM to the instance id, with any existing opkssh/EC2 key plus the default keys.
     3. opkssh, when the instance/cluster has opkssh tags. May open a browser login.
-    4. The EC2 key pair, when a matching file is found in ~/.ssh.
+    4. The EC2 key pair (or `target.key_file`), when a matching file is found in ~/.ssh.
     5. The ssh-agent and default ~/.ssh/id_* keys.
+
+    Unknown host keys are trusted, unless `confirm_host_key` declines them.
     """
     failures: list[str] = []
+    open_ssh_ = partial(open_ssh, confirm_host_key=confirm_host_key)
 
     def attempt(via: str, failure: str, open_client: Callable[[], paramiko.SSHClient]) -> Connection | None:
+        logger.info(f"Connecting via {via}")
         try:
             return Connection(open_client(), via)
         except Exception as e:
@@ -86,11 +95,11 @@ def connect(
         if connection := attempt(
             f"ssh config ({alias})",
             f":x: Failed with ssh config - ssh {alias}",
-            lambda: open_with_config(alias, options, target),
+            lambda: open_with_config(alias, options, target, confirm_host_key),
         ):
             return connection
 
-    ec2_key = find_ssh_key_file(target.key_name)
+    ec2_key = target.key_file or find_ssh_key_file(target.key_name)
     known_keys = [k for k in (valid_opkssh_key_file(target.opkssh_provider), ec2_key) if k]
 
     if not env.ssm_installed:
@@ -98,7 +107,7 @@ def connect(
     elif connection := attempt(
         "AWS SSM",
         ":x: Failed to start session with AWS session-manager",
-        lambda: open_ssh(
+        lambda: open_ssh_(
             target.instance_id,
             target.user,
             known_keys,
@@ -115,15 +124,15 @@ def connect(
         elif connection := attempt(
             "opkssh",
             ":x: Failed to authenticate with opkssh",
-            lambda: open_ssh(target.ip, target.user, [opkssh_login(provider, on_output, on_waiting)], use_defaults=False),
+            lambda: open_ssh_(target.ip, target.user, [opkssh_login(provider, on_output, on_waiting)], use_defaults=False),
         ):
             return connection
 
     if ec2_key is not None and (
         connection := attempt(
-            target.key_name or ec2_key,
+            Path(ec2_key).stem,
             f":x: Key found, but failed - ssh -o IdentitiesOnly=yes -i {ec2_key} {target.user}@{target.ip}",
-            lambda: open_ssh(target.ip, target.user, [ec2_key], use_defaults=False),
+            lambda: open_ssh_(target.ip, target.user, [ec2_key], use_defaults=False),
         )
     ):
         return connection
@@ -131,7 +140,7 @@ def connect(
     if connection := attempt(
         "default key",
         f":x: Failed with default key - ssh {target.user}@{target.ip}",
-        lambda: open_ssh(target.ip, target.user, [], use_defaults=True),
+        lambda: open_ssh_(target.ip, target.user, [], use_defaults=True),
     ):
         return connection
 
@@ -146,6 +155,7 @@ def open_ssh(
     use_defaults: bool,
     sock: socket.socket | None = None,
     port: int = 22,
+    confirm_host_key: ConfirmHostKey | None = None,
 ) -> paramiko.SSHClient:
     """`use_defaults` enables the ssh-agent and ~/.ssh/id_* keys, like OpenSSH without IdentitiesOnly."""
     known_hosts = SSH_DIR / 'known_hosts'
@@ -154,7 +164,7 @@ def open_ssh(
 
     client = paramiko.SSHClient()
     client.load_host_keys(str(known_hosts))
-    client.set_missing_host_key_policy(AcceptNewPolicy(known_hosts, port))
+    client.set_missing_host_key_policy(AcceptNewPolicy(known_hosts, port, confirm_host_key))
     try:
         client.connect(
             hostname,
@@ -176,15 +186,28 @@ def open_ssh(
     return client
 
 
-class AcceptNewPolicy(paramiko.MissingHostKeyPolicy):
-    """OpenSSH's `StrictHostKeyChecking=accept-new`: trust unknown hosts, still reject changed keys."""
+def open_shell_channel(client: paramiko.SSHClient) -> paramiko.Channel:
+    channel = client.get_transport().open_session()  # pyright: ignore[reportOptionalMemberAccess]
+    channel.get_pty(term='xterm-256color')
+    channel.invoke_shell()
+    return channel
 
-    def __init__(self, known_hosts: Path, port: int):
+
+class AcceptNewPolicy(paramiko.MissingHostKeyPolicy):
+    """OpenSSH's `StrictHostKeyChecking=accept-new`: trust unknown hosts, still reject changed keys.
+
+    With `confirm`, unknown hosts are only trusted when it returns True.
+    """
+
+    def __init__(self, known_hosts: Path, port: int, confirm: ConfirmHostKey | None = None):
         self.known_hosts = known_hosts
         self.port = port
+        self.confirm = confirm
 
     @override
     def missing_host_key(self, client: paramiko.SSHClient, hostname: str, key: paramiko.PKey):
+        if self.confirm is not None and not self.confirm(hostname, key):
+            raise paramiko.SSHException(f"Server {hostname!r} not found in known_hosts")
         logger.info(f"Adding {key.get_name()} host key for {hostname}: {key.fingerprint}")
         client.get_host_keys().add(hostname, key.get_name(), key)
         host = hostname if self.port == 22 else f"[{hostname}]:{self.port}"
@@ -208,7 +231,12 @@ def find_ssh_config(target: Target) -> tuple[str, paramiko.SSHConfigDict] | None
     return None
 
 
-def open_with_config(alias: str, options: paramiko.SSHConfigDict, target: Target) -> paramiko.SSHClient:
+def open_with_config(
+    alias: str,
+    options: paramiko.SSHConfigDict,
+    target: Target,
+    confirm_host_key: ConfirmHostKey | None = None,
+) -> paramiko.SSHClient:
     proxy = options.get('proxycommand')
     identities_only = options.get('identitiesonly', 'no').lower() == 'yes'
     return open_ssh(
@@ -218,6 +246,7 @@ def open_with_config(alias: str, options: paramiko.SSHConfigDict, target: Target
         use_defaults=not identities_only,
         sock=proxy_socket(proxy, lambda _: None) if proxy and proxy.lower() != 'none' else None,
         port=int(options.get('port', 22)),
+        confirm_host_key=confirm_host_key,
     )
 
 

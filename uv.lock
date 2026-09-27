@@ -25,7 +25,6 @@ source = { editable = "." }
 dependencies = [
     { name = "boto3" },
     { name = "click" },
-    { name = "click-spinner" },
     { name = "loguru" },
     { name = "paramiko" },
     { name = "pyte" },
@@ -53,7 +52,6 @@ publish = [
 requires-dist = [
     { name = "boto3" },
     { name = "click" },
-    { name = "click-spinner" },
     { name = "loguru" },
     { name = "paramiko" },
     { name = "pyte", specifier = ">=0.8.2" },
@@ -545,15 +543,6 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/c7/0e/7fa0ef50764b67090eca4114772a2abf8b6148198475e54c660b97caeee6/click-8.5.0.tar.gz", hash = "sha256:ba0d2089de75ea0310e2dde03160e6ca10009947fb95a182f9b54021bb272e34", size = 382235, upload-time = "2026-08-26T13:33:14.56Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/58/50/6c0d534c5f134586a8e1ba4e330569e32f057e33372ae556463212fb4cd3/click-8.5.0-py3-none-any.whl", hash = "sha256:255bc9599cf7748b4b1a446ccc735421bd08a2ae529a8b88597d3de5664ee360", size = 125251, upload-time = "2026-08-26T13:33:12.928Z" },
-]
-
-[[package]]
-name = "click-spinner"
-version = "0.2.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/7a/1b/c52f8e09feab7d40577bc4da34300b78a8f44d6aaf9a2912b2ffd0edf337/click_spinner-0.2.0.tar.gz", hash = "sha256:01371550596bc18f1e1546bb2956745eed387235235e664bc96f8cc675b7d6e8", size = 3821, upload-time = "2026-06-23T19:25:07.477Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/60/5c/392b6cb50b890f82a9c3e74905704dcb47f4d495d8be64770bca26554680/click_spinner-0.2.0-py3-none-any.whl", hash = "sha256:e79634a419ccedd597c85bc24b5804f851fc7e07b1c1daf13d91576d78883522", size = 3758, upload-time = "2026-06-23T19:25:06.228Z" },
 ]
 
 [[package]]
