@@ -60,6 +60,7 @@ Homepage = "https://github.com/mvanderlee/aws-ssh-utils"
 
 [project.scripts]
 aws_ssh = "aws_ssh_utils.ssh:cli"
+aws-ssh-utils = "aws_ssh_utils.ssh:cli"
 
 [tool.hatch.build]
 include = [

@@ -5,15 +5,15 @@
 [![Supported Python Versions](https://img.shields.io/pypi/pyversions/aws-ssh-utils.svg)](https://pypi.org/project/aws-ssh-utils/)
 
 ```shell
-pip install aws-ssh-utils
+uvx aws-ssh-utils
 
-aws_ssh ec2
+uvx aws-ssh-utils app  # optional - `app` is default.
+uvx aws-ssh-utils ec2
+uvx aws-ssh-utils emr
+uvx aws-ssh-utils emr-all
 
-aws_ssh emr
-
-aws_ssh emr-all
-
-aws_ssh app
+# Also exposed as `aws_ssh`
+uvx --from aws-ssh-utils aws_ssh
 ```
 
 This allows you to interactively SSH to an EC2 instance, EMR instance, or all EMR instances with TMUX.
