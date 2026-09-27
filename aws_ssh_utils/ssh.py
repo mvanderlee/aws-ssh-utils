@@ -20,13 +20,14 @@ from botocore.exceptions import ClientError
 from loguru import logger
 from typing_extensions import override
 
-from .emr_utils import (
+from aws_ssh_utils.commands.app import app
+from aws_ssh_utils.emr_utils import (
     IP,
     get_emr_instance_ips,
     prompt_for_emr_cluster,
     prompt_for_emr_instance_group,
 )
-from .interactive_ssh import interactive_shell
+from aws_ssh_utils.interactive_ssh import interactive_shell
 
 if TYPE_CHECKING:
     from mypy_boto3_ec2.service_resource import Instance
@@ -73,7 +74,26 @@ class SelectedEMRInstance:
     ip: IP
 
 
-@click.group()
+class DefaultCommandGroup(click.Group):
+    """Runs `default_command` when no subcommand is given, e.g. `aws_ssh -p prod` -> `aws_ssh app -p prod`.
+
+    Assumes all group options are flags, so the first argument that isn't one is where the subcommand goes.
+    """
+
+    def __init__(self, *args: Any, default_command: str, **kwargs: Any):
+        super().__init__(*args, **kwargs)
+        self.default_command = default_command
+
+    @override
+    def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
+        group_options = {opt for param in self.get_params(ctx) for opt in (*param.opts, *param.secondary_opts)}
+        idx = next((i for i, arg in enumerate(args) if arg not in group_options), len(args))
+        if idx == len(args) or args[idx].startswith('-'):
+            args = [*args[:idx], self.default_command, *args[idx:]]
+        return super().parse_args(ctx, args)
+
+
+@click.group(cls=DefaultCommandGroup, default_command='app')
 @click.option('-ll/', '--long-log/--no-long-log', default=False, help='Enable long logging')
 @click.option('--verbose/--no-verbose', default=False, help='Enable debug logging')
 @click.option('--quiet/--no-quiet', default=False, help='Disable logging')
@@ -83,6 +103,7 @@ def cli(
     quiet: bool = False,
     **kwargs: Any,
 ):
+    """Runs `app` when no command is given."""
     log_format = (
         (
             "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | "
@@ -96,6 +117,9 @@ def cli(
 
     logger.remove()
     logger.add(sys.stdout, level=level, format=log_format, colorize=True)
+
+
+cli.add_command(app)
 
 
 @cli.command('ec2')

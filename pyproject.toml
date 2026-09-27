@@ -34,7 +34,11 @@ dependencies = [
   "click_spinner",
   "loguru",
   "paramiko",
+  "pyte>=0.8.2",
   "questionary",
+  "requests>=2.34.2",
+  "rich>=15.0.0",
+  "textual>=8.2.8",
   "typing_extensions",
 ]
 dynamic = ["version"]
@@ -44,7 +48,9 @@ dev = [
     "boto3-stubs>=1.43.36",
     "mypy-boto3-ec2>=1.43.35",
     "mypy-boto3-emr>=1.43.23",
+    "mypy-boto3-sts>=1.43.94",
     "pre-commit>=4.6.0",
+    "pytest>=9.1.1",
 ]
 publish = [
   "hatch >= 1.7.0",
@@ -125,6 +131,7 @@ quote-style = "preserve"  # Don't change quotes - https://docs.astral.sh/ruff/se
 
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401"]
+"tests/**" = ["S101"]
 
 [tool.ruff.lint.flake8-bugbear]
 # Allow default arguments like, e.g., `data: List[str] = fastapi.Query(None)`.

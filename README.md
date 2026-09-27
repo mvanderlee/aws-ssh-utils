@@ -12,11 +12,36 @@ aws_ssh ec2
 aws_ssh emr
 
 aws_ssh emr-all
+
+aws_ssh app
 ```
 
 This allows you to interactively SSH to an EC2 instance, EMR instance, or all EMR instances with TMUX.
 
 It utilizes [questionary](https://pypi.org/project/questionary/) to ask you which instance you want to connect to.
+
+## App
+
+Terminal UI to browse EC2 instances and EMR clusters, with SSH shells in tabs.
+It's the default command, so `aws_ssh` and `aws_ssh -p my-profile` launch it too.
+Each connection tries, in order: `~/.ssh/config`, SSH over AWS SSM (`session-manager-plugin`), opkssh (via instance/cluster tags),
+the instance's EC2 key found in `~/.ssh`, then your default keys/ssh-agent.
+Unknown host keys are accepted and appended to `~/.ssh/known_hosts`; changed host keys are rejected.
+
+```shell
+$ aws_ssh app --help
+Usage: aws_ssh app [OPTIONS]
+
+  Browse EC2 instances and EMR clusters, and open SSH shells in tabs.
+
+Options:
+  -p, --profile TEXT  Which AWS profile to use
+  -r, --region TEXT   Which AWS region to use
+  --help              Show this message and exit.
+```
+
+`F12` shows/hides the sidebar, `ctrl+w` closes a failed tab, `ctrl+q` quits. Every other key goes to the focused shell.
+Logs are viewable with `textual console`.
 
 ## EC2
 
