@@ -21,6 +21,7 @@ from loguru import logger
 from typing_extensions import override
 
 from aws_ssh_utils.commands.app import app
+from aws_ssh_utils.commands.healthcheck import healthcheck
 from aws_ssh_utils.emr_utils import (
     IP,
     get_emr_instance_ips,
@@ -120,6 +121,7 @@ def cli(
 
 
 cli.add_command(app)
+cli.add_command(healthcheck)
 
 
 @cli.command('ec2')
