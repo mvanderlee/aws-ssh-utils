@@ -1,9 +1,11 @@
+import shlex
 from unittest import mock
 
 import pytest
 from click.testing import CliRunner
 
 from aws_ssh_utils import connection
+from aws_ssh_utils.cli_utils import render_attempts
 from aws_ssh_utils.commands.app import app as app_command
 from aws_ssh_utils.commands.healthcheck import healthcheck
 from aws_ssh_utils.connection import Connection, Environment, Target, connect
@@ -14,10 +16,11 @@ from aws_ssh_utils.terminal import key_to_input, pyte_color
 TARGET = Target(instance_id='i-123', ip='10.0.0.1', user='ec2-user', key_name='my-key', opkssh_provider='issuer,client')
 
 
-def test_connect_tries_every_strategy_in_order_and_returns_checklist():
+def test_connect_tries_every_strategy_in_order_and_reports_progress():
     """All strategies fail: every attempt is made in spec order and reported."""
     env = Environment(ssm_installed=True, opkssh_installed=True)
     calls = []
+    progress = []
 
     def fail(hostname, username, key_files, **kwargs):
         calls.append((hostname, list(key_files), kwargs['use_defaults'], kwargs.get('sock') is not None))
@@ -31,7 +34,7 @@ def test_connect_tries_every_strategy_in_order_and_returns_checklist():
         mock.patch.object(connection, 'proxy_socket', return_value=mock.Mock()),
         mock.patch.object(connection, 'open_ssh', side_effect=fail),
     ):
-        result = connect(TARGET, env, on_output=lambda _: None, on_waiting=lambda: None)
+        result = connect(TARGET, env, on_output=lambda _: None, on_waiting=lambda: None, on_progress=progress.append)
 
     assert calls == [
         ('i-123', ['/k/my-key.pem'], True, True),  # SSM
@@ -39,26 +42,47 @@ def test_connect_tries_every_strategy_in_order_and_returns_checklist():
         ('10.0.0.1', ['/k/my-key.pem'], False, False),  # EC2 key
         ('10.0.0.1', [], True, False),  # default keys
     ]
-    assert isinstance(result, list)
-    assert [line.split('\n')[0] for line in result] == [
-        ":x: Failed to start session with AWS session-manager",
-        ":x: Failed to authenticate with opkssh",
-        ":x: Key found, but failed - ssh -o IdentitiesOnly=yes -i /k/my-key.pem ec2-user@10.0.0.1",
-        ":x: Failed with default key - ssh ec2-user@10.0.0.1",
+    assert result is None
+    opkssh_key = shlex.quote(str(connection.opkssh_key_path('issuer,client')))
+    assert str(render_attempts(progress[0])).splitlines()[1:] == ["  opkssh", "  my-key", "  default key"]
+    assert str(render_attempts(progress[-1])).splitlines() == [
+        "❌ Failed to connect via AWS SSM - nope",
+        (
+            "    ssh -o 'ProxyCommand=aws ssm start-session --target i-123 --document-name AWS-StartSSHSession"
+            " --parameters portNumber=22' -i /k/my-key.pem ec2-user@i-123"
+        ),
+        "❌ Failed to connect via opkssh - nope",
+        (
+            f"    opkssh login --provider issuer,client -i {opkssh_key}"
+            f" && ssh -o IdentitiesOnly=yes -i {opkssh_key} ec2-user@10.0.0.1"
+        ),
+        "❌ Failed to connect via my-key - nope",
+        "    ssh -o IdentitiesOnly=yes -i /k/my-key.pem ec2-user@10.0.0.1",
+        "❌ Failed to connect via default key - nope",
+        "    ssh ec2-user@10.0.0.1",
     ]
 
 
 def test_connect_stops_at_first_success_and_reports_missing_tools():
-    """Missing SSM is skipped, first working strategy wins."""
+    """Missing tools are skipped, first working strategy wins."""
     env = Environment(ssm_installed=False, opkssh_installed=False)
     client = mock.Mock()
+    progress = []
     with (
         mock.patch.object(connection, 'find_ssh_config', return_value=None),
         mock.patch.object(connection, 'find_ssh_key_file', return_value='/k/my-key.pem'),
         mock.patch.object(connection, 'valid_opkssh_key_file', return_value=None),
         mock.patch.object(connection, 'open_ssh', return_value=client) as open_ssh,
     ):
-        assert connect(TARGET, env, on_output=lambda _: None, on_waiting=lambda: None) == Connection(client, 'my-key')
+        result = connect(TARGET, env, on_output=lambda _: None, on_waiting=lambda: None, on_progress=progress.append)
+
+    assert result == Connection(client, 'my-key')
+    assert str(render_attempts(progress[-1])).splitlines() == [
+        "  session-manager-plugin not installed, skipping.",
+        "  opkssh not installed, skipping.",
+        "✓ Connected via my-key",
+        "  default key",
+    ]
 
     open_ssh.assert_called_once_with('10.0.0.1', 'ec2-user', ['/k/my-key.pem'], use_defaults=False, confirm_host_key=None)
 

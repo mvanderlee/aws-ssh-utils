@@ -6,10 +6,11 @@ import json
 import os
 import subprocess
 import sys
-from collections.abc import Callable
+import time
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from shutil import which
-from typing import ParamSpec, TypeVar
+from typing import ParamSpec, TypeVar, cast
 
 import click
 import paramiko
@@ -17,11 +18,14 @@ import questionary
 from botocore.exceptions import ClientError
 from loguru import logger
 from rich.console import Console
+from rich.live import Live
 from rich.markup import escape
+from rich.spinner import Spinner
 from rich.status import Status
+from rich.text import Text
 
 from aws_ssh_utils.commands.healthcheck import is_aws_ssm_installed, is_opkssh_installed
-from aws_ssh_utils.connection import Environment, Target, connect, open_shell_channel
+from aws_ssh_utils.connection import Attempt, Environment, Target, connect, open_shell_channel
 from aws_ssh_utils.terminal import ShellApp
 
 P = ParamSpec('P')
@@ -37,6 +41,7 @@ WINDOWS_TERMINAL_SETTINGS = (
 """Relative to %LOCALAPPDATA%: Store, Store preview, and unpackaged installs."""
 
 console = Console(stderr=True)
+connecting_spinner = Spinner('dots')
 
 
 class ShellError(Exception):
@@ -48,6 +53,29 @@ class ShellError(Exception):
 
 def spinner(message: str = '') -> Status:
     return console.status(message, spinner='dots')
+
+
+def render_attempts(attempts: Sequence[Attempt]) -> Text:
+    """The connection checklist: done attempts, the current one with a spinner, and the remaining ones muted."""
+
+    def line(attempt: Attempt) -> Text:
+        match attempt.state:
+            case 'connecting':
+                frame = cast(Text, connecting_spinner.render(time.monotonic()))
+                return Text.assemble(frame, f" Connecting via {attempt.via} ...")
+            case 'connected':
+                return Text(f"✓ Connected via {attempt.via}", 'green')
+            case 'failed':
+                return Text.assemble(
+                    f"❌ Failed to connect via {attempt.via} - {attempt.detail}\n",
+                    (f"    {attempt.command}", 'dim'),
+                )
+            case 'skipped':
+                return Text(f"  {attempt.detail}, skipping.", 'dim')
+            case 'pending':
+                return Text(f"  {attempt.via}", 'dim')
+
+    return Text('\n').join(line(a) for a in attempts)
 
 
 def handle_errors(func: Callable[P, R]) -> Callable[P, R]:
@@ -145,10 +173,28 @@ def open_shell(target: Target, env: Environment, title: str, scrollback: int | N
 
     `scrollback` defaults to the terminal's own setting, see `detect_scrollback`.
     """
-    result = connect(target, env, on_output=logger.info, on_waiting=lambda: None, confirm_host_key=confirm_host_key)
-    if isinstance(result, list):
-        for line in result:
-            console.print(escape(line))
+    attempts: list[Attempt] = []
+    with Live(console=console, get_renderable=lambda: render_attempts(attempts)) as live:
+
+        def on_progress(snapshot: list[Attempt]):
+            attempts[:] = snapshot
+
+        def confirm(hostname: str, key: paramiko.PKey) -> bool:
+            live.stop()
+            try:
+                return confirm_host_key(hostname, key)
+            finally:
+                live.start()
+
+        result = connect(
+            target,
+            env,
+            on_output=lambda line: live.console.print(escape(line)),
+            on_waiting=lambda: None,
+            on_progress=on_progress,
+            confirm_host_key=confirm,
+        )
+    if result is None:
         raise ShellError(f'Failed to connect to {target.user}@{target.ip}')
 
     channel = open_shell_channel(result.client)

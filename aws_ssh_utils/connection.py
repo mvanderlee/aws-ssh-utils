@@ -7,12 +7,12 @@ import subprocess
 import threading
 import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from fnmatch import fnmatch
 from functools import partial
 from hashlib import sha256
 from pathlib import Path
-from typing import IO, cast
+from typing import IO, Literal, cast
 
 import paramiko
 from loguru import logger
@@ -59,14 +59,29 @@ class Connection:
     """How the connection was made: AWS SSM, opkssh, a key name, ..."""
 
 
+@dataclass(frozen=True)
+class Attempt:
+    via: str
+    command: str
+    """The equivalent command line, to retry by hand."""
+    open_client: Callable[[], paramiko.SSHClient] = field(repr=False, compare=False)
+    state: Literal['pending', 'connecting', 'connected', 'failed', 'skipped'] = 'pending'
+    detail: str = ''
+    """The error when failed, the reason when skipped."""
+
+
+OnProgress = Callable[[list[Attempt]], None]
+
+
 def connect(
     target: Target,
     env: Environment,
     on_output: OnOutput,
     on_waiting: Callable[[], None],
+    on_progress: OnProgress,
     confirm_host_key: ConfirmHostKey | None = None,
-) -> Connection | list[str]:
-    """Return the first successful connection, or the failure checklist.
+) -> Connection | None:
+    """Return the first successful connection, or None when all fail.
 
     Tried in order:
     1. ~/.ssh/config, when a Host pattern (other than `*`) matches the instance id, an alias or the IP.
@@ -75,76 +90,82 @@ def connect(
     4. The EC2 key pair (or `target.key_file`), when a matching file is found in ~/.ssh.
     5. The ssh-agent and default ~/.ssh/id_* keys.
 
+    `on_progress` gets a snapshot of all attempts whenever one changes state.
     Unknown host keys are trusted, unless `confirm_host_key` declines them.
     """
-    failures: list[str] = []
     open_ssh_ = partial(open_ssh, confirm_host_key=confirm_host_key)
-
-    def attempt(via: str, failure: str, open_client: Callable[[], paramiko.SSHClient]) -> Connection | None:
-        logger.info(f"Connecting via {via}")
-        try:
-            return Connection(open_client(), via)
-        except Exception as e:
-            logger.debug(f"{failure}: {e!r}")
-            failures.append(f"{failure}\n    {e or type(e).__name__}")
-            return None
+    attempts: list[Attempt] = []
 
     config = find_ssh_config(target)
     if config is not None:
         alias, options = config
-        if connection := attempt(
-            f"ssh config ({alias})",
-            f":x: Failed with ssh config - ssh {alias}",
-            lambda: open_with_config(alias, options, target, confirm_host_key),
-        ):
-            return connection
+        attempts.append(
+            Attempt(
+                f"ssh config ({alias})",
+                shlex.join(['ssh', alias]),
+                lambda: open_with_config(alias, options, target, confirm_host_key),
+            ),
+        )
 
     ec2_key = target.key_file or find_ssh_key_file(target.key_name)
     known_keys = [k for k in (valid_opkssh_key_file(target.opkssh_provider), ec2_key) if k]
-
-    if not env.ssm_installed:
-        failures.append(":x: AWS session-manager-plugin not installed")
-    elif connection := attempt(
+    ssm_proxy = ssm_command(target.instance_id, env)
+    ssm = Attempt(
         "AWS SSM",
-        ":x: Failed to start session with AWS session-manager",
+        ssh_command(target.user, target.instance_id, known_keys, proxy=ssm_proxy),
         lambda: open_ssh_(
             target.instance_id,
             target.user,
             known_keys,
             use_defaults=True,
-            sock=proxy_socket(ssm_command(target.instance_id, env), on_output),
+            sock=proxy_socket(ssm_proxy, on_output),
         ),
-    ):
-        return connection
+    )
+    attempts.append(ssm if env.ssm_installed else replace(ssm, state='skipped', detail="session-manager-plugin not installed"))
 
-    if target.opkssh_provider is not None:
-        provider = target.opkssh_provider
-        if not env.opkssh_installed:
-            failures.append(":x: Failed to authenticate with opkssh\n    opkssh not installed")
-        elif connection := attempt(
+    if (provider := target.opkssh_provider) is not None:
+        opkssh_key = str(opkssh_key_path(provider))
+        opkssh = Attempt(
             "opkssh",
-            ":x: Failed to authenticate with opkssh",
+            f"{shlex.join(opkssh_login_command(provider, opkssh_key))} && "
+            + ssh_command(target.user, target.ip, [opkssh_key], identities_only=True),
             lambda: open_ssh_(target.ip, target.user, [opkssh_login(provider, on_output, on_waiting)], use_defaults=False),
-        ):
-            return connection
-
-    if ec2_key is not None and (
-        connection := attempt(
-            Path(ec2_key).stem,
-            f":x: Key found, but failed - ssh -o IdentitiesOnly=yes -i {ec2_key} {target.user}@{target.ip}",
-            lambda: open_ssh_(target.ip, target.user, [ec2_key], use_defaults=False),
         )
-    ):
-        return connection
+        attempts.append(opkssh if env.opkssh_installed else replace(opkssh, state='skipped', detail="opkssh not installed"))
 
-    if connection := attempt(
-        "default key",
-        f":x: Failed with default key - ssh {target.user}@{target.ip}",
-        lambda: open_ssh_(target.ip, target.user, [], use_defaults=True),
-    ):
-        return connection
+    if ec2_key is not None:
+        attempts.append(
+            Attempt(
+                Path(ec2_key).stem,
+                ssh_command(target.user, target.ip, [ec2_key], identities_only=True),
+                lambda: open_ssh_(target.ip, target.user, [ec2_key], use_defaults=False),
+            ),
+        )
 
-    return failures
+    attempts.append(
+        Attempt(
+            "default key",
+            ssh_command(target.user, target.ip),
+            lambda: open_ssh_(target.ip, target.user, [], use_defaults=True),
+        ),
+    )
+
+    for i, attempt in enumerate(attempts):
+        if attempt.state == 'skipped':
+            continue
+        attempts[i] = replace(attempt, state='connecting')
+        on_progress(list(attempts))
+        try:
+            client = attempt.open_client()
+        except Exception as e:
+            logger.debug(f"Failed to connect via {attempt.via}: {e!r}")
+            attempts[i] = replace(attempt, state='failed', detail=str(e) or type(e).__name__)
+            on_progress(list(attempts))
+            continue
+        attempts[i] = replace(attempt, state='connected')
+        on_progress(list(attempts))
+        return Connection(client, attempt.via)
+    return None
 
 
 def open_ssh(
@@ -184,6 +205,25 @@ def open_ssh(
             sock.close()
         raise
     return client
+
+
+def ssh_command(
+    user: str,
+    host: str,
+    key_files: Sequence[str] = (),
+    *,
+    identities_only: bool = False,
+    proxy: list[str] | None = None,
+) -> str:
+    """The OpenSSH command line equivalent of an `open_ssh` call."""
+    cmd = ['ssh']
+    if proxy:
+        cmd += ['-o', f'ProxyCommand={shlex.join(proxy)}']
+    if identities_only:
+        cmd += ['-o', 'IdentitiesOnly=yes']
+    for key_file in key_files:
+        cmd += ['-i', key_file]
+    return shlex.join([*cmd, f'{user}@{host}'])
 
 
 def open_shell_channel(client: paramiko.SSHClient) -> paramiko.Channel:
@@ -357,6 +397,10 @@ def valid_opkssh_key_file(provider: str | None) -> str | None:
     return str(key) if key.is_file() and key.stat().st_mtime > time.time() - OPKSSH_KEY_MAX_AGE else None
 
 
+def opkssh_login_command(provider: str, key_file: str) -> list[str]:
+    return ['opkssh', 'login', '--provider', provider, '-i', key_file]
+
+
 def opkssh_login(provider: str, on_output: OnOutput, on_waiting: Callable[[], None]) -> str:
     """Return a valid opkssh key file, logging in when missing or expired."""
     if key_file := valid_opkssh_key_file(provider):
@@ -368,7 +412,7 @@ def opkssh_login(provider: str, on_output: OnOutput, on_waiting: Callable[[], No
         path.unlink(missing_ok=True)
 
     proc = subprocess.Popen(  # noqa: S603
-        ['opkssh', 'login', '--provider', provider, '-i', str(key)],  # noqa: S607
+        opkssh_login_command(provider, str(key)),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,

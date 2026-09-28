@@ -22,8 +22,8 @@ from textual.widgets import Footer, Input, OptionList, RichLog, Static, TabbedCo
 from textual.widgets.option_list import Option
 from textual.widgets.tree import TreeNode
 
-from aws_ssh_utils.cli_utils import detect_environment, detect_scrollback, scrollback_option
-from aws_ssh_utils.connection import Environment, Target, connect, open_shell_channel
+from aws_ssh_utils.cli_utils import detect_environment, detect_scrollback, render_attempts, scrollback_option
+from aws_ssh_utils.connection import Attempt, Environment, Target, connect, open_shell_channel
 from aws_ssh_utils.ec2_utils import ec2_name, ec2_target, get_running_ec2_instances
 from aws_ssh_utils.emr_utils import emr_target, get_emr_clusters, get_emr_instances, group_role, group_sort_key
 from aws_ssh_utils.terminal import ShellStatus, Terminal
@@ -99,8 +99,10 @@ class ShellPane(TabPane):
         self.scrollback = scrollback
         self.status: Status = 'connecting'
         self.spinner = Spinner('dots')
+        self.attempts: list[Attempt] = []
 
     def compose(self) -> ComposeResult:
+        yield Static(classes='attempts')
         yield RichLog(wrap=True, markup=True)
 
     def on_mount(self):
@@ -110,6 +112,11 @@ class ShellPane(TabPane):
     def update_label(self):
         icon = cast(Text, self.spinner.render(time.monotonic())) if self.status == 'connecting' else STATUS_ICONS[self.status]
         self.query_ancestor(TabbedContent).get_tab(self).label = Text.assemble(icon, ' ', self.title_)
+        self.query_one('.attempts', Static).update(render_attempts(self.attempts))
+
+    def set_attempts(self, attempts: list[Attempt]):
+        self.attempts = attempts
+        self.update_label()
 
     def set_status(self, status: Status):
         self.status = status
@@ -131,10 +138,9 @@ class ShellPane(TabPane):
                 self.env,
                 on_output=write,
                 on_waiting=lambda: self.app.call_from_thread(self.set_status, 'waiting'),
+                on_progress=lambda attempts: self.app.call_from_thread(self.set_attempts, attempts),
             )
-            if isinstance(result, list):
-                for line in result:
-                    write(line)
+            if result is None:
                 self.app.call_from_thread(self.set_status, 'failed')
                 return
 
@@ -149,6 +155,7 @@ class ShellPane(TabPane):
 
     async def attach(self, via: str, terminal: Terminal):
         await self.query_one(RichLog).remove()
+        await self.query_one('.attempts').remove()
         await self.mount(ShellStatus(via), terminal)
         self.set_status('connected')
 

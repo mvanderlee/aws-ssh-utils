@@ -53,8 +53,12 @@ def cli(
     )
     level = "DEBUG" if verbose else 100 if quiet else "INFO"
 
+    def to_stdout(message: str):
+        # Look up sys.stdout per message, so rich.live can redirect it above its display.
+        sys.stdout.write(message)
+
     logger.remove()
-    logger.add(sys.stdout, level=level, format=log_format, colorize=True)
+    logger.add(to_stdout, level=level, format=log_format, colorize=True)
 
 
 for command in (app, ec2, emr, emr_all, healthcheck):

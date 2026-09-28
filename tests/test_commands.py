@@ -162,7 +162,7 @@ def test_explicit_key_file_replaces_key_lookup():
         mock.patch.object(connection, 'find_ssh_key_file') as find_key,
         mock.patch.object(connection, 'open_ssh') as open_ssh,
     ):
-        result = connection.connect(target, env, on_output=lambda _: None, on_waiting=lambda: None)
+        result = connection.connect(target, env, on_output=lambda _: None, on_waiting=lambda: None, on_progress=lambda _: None)
 
     find_key.assert_not_called()
     assert result == connection.Connection(open_ssh.return_value, 'mine')
