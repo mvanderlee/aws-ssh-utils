@@ -26,6 +26,7 @@ from rich.text import Text
 
 from aws_ssh_utils.commands.healthcheck import is_aws_ssm_installed, is_opkssh_installed
 from aws_ssh_utils.connection import Attempt, Environment, Target, connect, open_shell_channel
+from aws_ssh_utils.logging_utils import terminal_logging
 from aws_ssh_utils.terminal import ShellApp
 
 P = ParamSpec('P')
@@ -202,10 +203,8 @@ def open_shell(target: Target, env: Environment, title: str, scrollback: int | N
         channel.send(initial_input)
 
     set_terminal_title(title)
-    # Logs, e.g. AWS SSM's stderr, would draw over the full-screen shell.
-    logger.disable('aws_ssh_utils')
     try:
-        ShellApp(result.via, result.client, channel, detect_scrollback() if scrollback is None else scrollback).run()
+        with terminal_logging():
+            ShellApp(result.via, result.client, channel, detect_scrollback() if scrollback is None else scrollback).run()
     finally:
-        logger.enable('aws_ssh_utils')
         set_terminal_title()

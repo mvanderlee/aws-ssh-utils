@@ -51,6 +51,19 @@ Scroll back with the mouse wheel or `shift+PgUp`/`shift+PgDn`; typing jumps back
 `F12` shows/hides the sidebar, `ctrl+w` closes a failed tab, `ctrl+q` quits. Every other key goes to the focused shell.
 Logs are viewable with `textual console`.
 
+To keep diagnostics and crash tracebacks in a file, use the global `--log-file` option:
+
+```shell
+aws-ssh-utils --log-file ./aws-ssh.log --verbose --profile my-profile
+# Also works before an explicit command:
+aws-ssh-utils --log-file ./aws-ssh.log ec2 --profile my-profile
+```
+
+Alternatively, set `AWS_SSH_LOG_FILE` to the file path. Logs append across runs and rotate at 10 MB,
+keeping up to three rotated files. `--verbose` includes debug diagnostics; `--quiet` only suppresses
+console logging. File logs include the version, source location, and error tracebacks, without local
+variable dumps or a recording of shell input/output.
+
 ## EC2
 
 Select an instance from an interactive list. You can filter the instances by name.

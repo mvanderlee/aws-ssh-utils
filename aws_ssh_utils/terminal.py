@@ -8,12 +8,13 @@ from functools import lru_cache
 from typing import Any
 
 import pyte
+from loguru import logger
 from pyte.screens import Char, Margins
 from rich.segment import Segment
 from rich.style import Style
 from rich.text import Text
 from textual import events, work
-from textual.app import App, ComposeResult
+from textual.app import ComposeResult
 from textual.containers import Horizontal
 from textual.message import Message
 from textual.strip import Strip
@@ -21,6 +22,7 @@ from textual.widget import Widget
 from textual.widgets import Static
 from typing_extensions import override
 
+from aws_ssh_utils.logging_utils import LoggedApp
 from aws_ssh_utils.session import ShellChannel, ShellClient
 
 KEYS = {
@@ -121,6 +123,14 @@ class ChannelScreen(pyte.Screen):
         self.channel.send(data.encode())
 
     @override
+    def select_graphic_rendition(self, *attrs: int, private: bool = False):
+        # Vim queries modifyOtherKeys with CSI ? 4 m. pyte 0.8.2 dispatches it
+        # here, but its SGR handler rejects `private`, killing the reader worker.
+        # Ignore unsupported keyboard queries without changing text attributes.
+        if not private:
+            super().select_graphic_rendition(*attrs)
+
+    @override
     def index(self):
         top, bottom = self.margins or Margins(0, self.lines - 1)
         # Only full-screen scrolls; lines leaving a scroll region (e.g. below a status line) aren't history.
@@ -168,8 +178,15 @@ class Terminal(Widget, can_focus=True):
             while data := self.channel.recv(65536):
                 self.app.call_from_thread(self.feed, data)
         except OSError:
-            pass
-        self.post_message(self.Closed())
+            logger.exception('Terminal channel read failed')
+        except Exception:
+            logger.exception('Terminal reader failed')
+            raise
+        finally:
+            # Unexpected parser errors must also tear down the dead session.
+            # Textual records the worker exception, but exit_on_error=False
+            # would otherwise leave the last frame looking like a live terminal.
+            self.post_message(self.Closed())
 
     def feed(self, data: bytes):
         history_size = len(self.vt.history)
@@ -227,7 +244,9 @@ class Terminal(Widget, can_focus=True):
     def render_line(self, y: int) -> Strip:
         vt = self.vt
         if y >= vt.lines:
-            return Strip.blank(self.size.width)
+            # Layout may grow before on_resize updates pyte. Textual's color
+            # filters require a Style even for these temporary blank rows.
+            return Strip.blank(self.size.width, Style())
 
         index = len(vt.history) - self.scrolled + y
         if index < len(vt.history):
@@ -282,7 +301,7 @@ class ShellStatus(Horizontal):
         self.query_one('.duration', Static).update(f"{hours:02}:{minutes:02}:{seconds:02}")
 
 
-class ShellApp(App[None]):
+class ShellApp(LoggedApp):
     """A single full-screen shell, exits when the shell closes."""
 
     # Its priority ctrl+p binding would steal shell history navigation from the terminal.

@@ -14,10 +14,9 @@ from rich.markup import escape
 from rich.spinner import Spinner
 from rich.text import Text
 from textual import work
-from textual.app import App, ComposeResult
+from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
 from textual.containers import Horizontal
-from textual.logging import TextualHandler
 from textual.widgets import Footer, Input, OptionList, RichLog, Static, TabbedContent, TabPane, Tree
 from textual.widgets.option_list import Option
 from textual.widgets.tree import TreeNode
@@ -26,6 +25,7 @@ from aws_ssh_utils.cli_utils import detect_environment, detect_scrollback, rende
 from aws_ssh_utils.connection import Attempt, Environment, Target, connect, open_shell_channel
 from aws_ssh_utils.ec2_utils import ec2_name, ec2_target, get_running_ec2_instances
 from aws_ssh_utils.emr_utils import emr_target, get_emr_clusters, get_emr_instances, group_role, group_sort_key
+from aws_ssh_utils.logging_utils import LoggedApp, terminal_logging
 from aws_ssh_utils.terminal import ShellStatus, Terminal
 
 if TYPE_CHECKING:
@@ -53,16 +53,14 @@ def app(profile: str | None = None, region: str | None = None, scrollback: int |
         session = boto3.Session(profile_name=profile, region_name=region)
         session.client('sts').get_caller_identity()
     except (BotoCoreError, ClientError) as e:
+        logger.bind(file_only=True).opt(exception=e).error('AWS authentication failed')
         Console().print(f"[red]✗[/] {escape(str(e))}")
         sys.exit(1)
 
-    # loguru holds on to the real stdout, which would draw over the TUI. View logs with `textual console`.
-    logger.remove()
-    logger.add(TextualHandler(), format="{message}")
-
     env = detect_environment(profile, session.region_name)
     scrollback = detect_scrollback() if scrollback is None else scrollback
-    SSHApp(session.client('ec2'), session.client('emr'), env, scrollback).run()
+    with terminal_logging():
+        SSHApp(session.client('ec2'), session.client('emr'), env, scrollback).run()
 
 
 def muted_label(name: str, instance_id: str) -> Text:
@@ -112,10 +110,10 @@ class ShellPane(TabPane):
     def update_label(self):
         icon = cast(Text, self.spinner.render(time.monotonic())) if self.status == 'connecting' else STATUS_ICONS[self.status]
         self.query_ancestor(TabbedContent).get_tab(self).label = Text.assemble(icon, ' ', self.title_)
-        self.query_one('.attempts', Static).update(render_attempts(self.attempts))
 
     def set_attempts(self, attempts: list[Attempt]):
         self.attempts = attempts
+        self.query_one('.attempts', Static).update(render_attempts(self.attempts))
         self.update_label()
 
     def set_status(self, status: Status):
@@ -154,16 +152,20 @@ class ShellPane(TabPane):
         self.app.call_from_thread(self.attach, result.via, Terminal(result.client, channel, self.scrollback))
 
     async def attach(self, via: str, terminal: Terminal):
+        logger.info('Shell tab {} connected via {}', self.id, via)
+        # Stop animation before yielding to widget removal or mounting a reader
+        # that may immediately close the session.
+        self.set_status('connected')
         await self.query_one(RichLog).remove()
         await self.query_one('.attempts').remove()
         await self.mount(ShellStatus(via), terminal)
-        self.set_status('connected')
 
     def on_terminal_closed(self):
+        logger.info('Shell tab {} closed', self.id)
         self.query_ancestor(TabbedContent).remove_pane(self.id or '')
 
 
-class SSHApp(App[None]):
+class SSHApp(LoggedApp):
     """The textual app"""
 
     TITLE = "AWS SSH"
@@ -252,9 +254,16 @@ class SSHApp(App[None]):
         if shells.active:
             shells.remove_pane(shells.active)
 
+    def on_tabbed_content_tab_activated(self, event: TabbedContent.TabActivated):
+        if event.tabbed_content.id != 'shells' or event.pane.id != event.tabbed_content.active:
+            return
+        if terminals := event.pane.query(Terminal):
+            terminals.first().focus()
+
     def open_shell(self, title: str, resolve: Callable[[], Target]):
         shells = self.query_one('#shells', TabbedContent)
         pane = ShellPane(title, resolve, self.env, self.scrollback, id=f'shell-{next(self.pane_ids)}')
+        logger.info('Opening shell tab {} ({})', pane.id, title)
         shells.add_pane(pane)
         shells.active = pane.id or ''
 

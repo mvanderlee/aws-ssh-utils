@@ -1,19 +1,92 @@
+import asyncio
 import shlex
 from unittest import mock
 
 import pytest
 from click.testing import CliRunner
+from textual.app import App
+from textual.widgets import RichLog, Static, TabbedContent
 
 from aws_ssh_utils import connection
 from aws_ssh_utils.cli_utils import render_attempts
+from aws_ssh_utils.commands.app import ShellPane, SSHApp
 from aws_ssh_utils.commands.app import app as app_command
 from aws_ssh_utils.commands.healthcheck import healthcheck
-from aws_ssh_utils.connection import Connection, Environment, Target, connect
+from aws_ssh_utils.connection import Attempt, Connection, Environment, Target, connect
 from aws_ssh_utils.emr_utils import group_role, group_sort_key
 from aws_ssh_utils.ssh import cli
-from aws_ssh_utils.terminal import key_to_input, pyte_color
+from aws_ssh_utils.terminal import ShellStatus, Terminal, key_to_input, pyte_color
 
 TARGET = Target(instance_id='i-123', ip='10.0.0.1', user='ec2-user', key_name='my-key', opkssh_provider='issuer,client')
+
+
+def test_switching_shell_tabs_restores_keyboard_input():
+    app = SSHApp(mock.Mock(), mock.Mock(), Environment(False, False), 100)
+    channels = [mock.Mock(), mock.Mock()]
+
+    async def run():
+        with (
+            mock.patch.object(app, 'load_ec2'),
+            mock.patch.object(app, 'load_emr'),
+            mock.patch.object(ShellPane, 'connect'),
+            mock.patch.object(Terminal, 'read_channel'),
+        ):
+            async with app.run_test(size=(140, 40)) as pilot:
+                for index, channel in enumerate(channels):
+                    app.open_shell(str(index), lambda: TARGET)
+                    await pilot.pause()
+                    pane = app.query_one(f'#shell-{index}', ShellPane)
+                    await pane.attach('SSH', Terminal(mock.Mock(), channel))
+                    await pilot.pause()
+
+                shells = app.query_one('#shells', TabbedContent)
+                for index in (0, 1, 0):
+                    shells.active = f'shell-{index}'
+                    await pilot.pause()
+                    terminal = shells.active_pane.query_one(Terminal)
+                    assert app.focused is terminal
+                    channels[index].send.reset_mock()
+                    await pilot.press('x')
+                    channels[index].send.assert_called_once_with(b'x')
+
+    asyncio.run(run())
+
+
+def test_shell_attach_stops_animation_and_updates_label_without_attempts():
+    pane = ShellPane('Test shell', lambda: TARGET, Environment(False, False), 0, id='shell-test')
+    terminal = Terminal(mock.Mock(), mock.Mock())
+
+    class TestApp(App):
+        def compose(self):
+            with TabbedContent():
+                yield pane
+
+    async def run():
+        with mock.patch.object(pane, 'connect'), mock.patch.object(terminal, 'read_channel'):
+            async with TestApp().run_test():
+                attempts = [Attempt('SSH', 'ssh example', mock.Mock(), state='connecting')]
+                pane.set_attempts(attempts)
+                assert str(pane.query_one('.attempts', Static).render()) == str(render_attempts(attempts))
+                with mock.patch.object(pane.animation, 'stop', wraps=pane.animation.stop) as stop:
+                    original_remove = RichLog.remove
+
+                    def remove_log(log):
+                        # The timer must stop before the first removal yields control.
+                        stop.assert_called_once()
+                        return original_remove(log)
+
+                    with mock.patch.object(RichLog, 'remove', remove_log):
+                        await pane.attach('SSH', terminal)
+
+                assert pane.status == 'connected'
+                assert not pane.query('.attempts')
+                assert not pane.query(RichLog)
+                assert pane.query_one(Terminal) is terminal
+                assert pane.query_one(ShellStatus).via == 'SSH'
+                pane.update_label()
+                assert pane.query_ancestor(TabbedContent).get_tab(pane).label.plain == '● Test shell'
+
+    asyncio.run(run())
 
 
 def test_connect_tries_every_strategy_in_order_and_reports_progress():
