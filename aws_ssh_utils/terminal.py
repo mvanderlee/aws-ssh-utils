@@ -1,4 +1,4 @@
-"""Textual widgets rendering a paramiko shell channel through the pyte VT100 emulator."""
+"""Textual widgets rendering SSH and SSM shell channels through the pyte VT100 emulator."""
 
 import datetime as dt
 import time
@@ -7,7 +7,6 @@ from collections.abc import Sequence
 from functools import lru_cache
 from typing import Any
 
-import paramiko
 import pyte
 from pyte.screens import Char, Margins
 from rich.segment import Segment
@@ -21,6 +20,8 @@ from textual.strip import Strip
 from textual.widget import Widget
 from textual.widgets import Static
 from typing_extensions import override
+
+from aws_ssh_utils.session import ShellChannel, ShellClient
 
 KEYS = {
     'enter': '\r',
@@ -108,7 +109,7 @@ def cell_style(
 class ChannelScreen(pyte.Screen):
     """Answers terminal queries over the channel, and keeps the lines scrolled off the top as history."""
 
-    def __init__(self, channel: paramiko.Channel, columns: int, lines: int, scrollback: int = 0):
+    def __init__(self, channel: ShellChannel, columns: int, lines: int, scrollback: int = 0):
         super().__init__(columns, lines)
         self.channel = channel
         self.history: deque[tuple[Char, ...]] = deque(maxlen=scrollback)
@@ -145,7 +146,7 @@ class Terminal(Widget, can_focus=True):
     class Closed(Message):
         pass
 
-    def __init__(self, client: paramiko.SSHClient, channel: paramiko.Channel, scrollback: int = 0, **kwargs: object):
+    def __init__(self, client: ShellClient, channel: ShellChannel, scrollback: int = 0, **kwargs: object):
         super().__init__(**kwargs)  # pyright: ignore[reportArgumentType]
         self.client = client
         self.channel = channel
@@ -287,7 +288,7 @@ class ShellApp(App[None]):
     # Its priority ctrl+p binding would steal shell history navigation from the terminal.
     ENABLE_COMMAND_PALETTE = False
 
-    def __init__(self, via: str, client: paramiko.SSHClient, channel: paramiko.Channel, scrollback: int = 0):
+    def __init__(self, via: str, client: ShellClient, channel: ShellChannel, scrollback: int = 0):
         super().__init__()
         self.via = via
         self.client = client

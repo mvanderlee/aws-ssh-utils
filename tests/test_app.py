@@ -31,26 +31,24 @@ def test_connect_tries_every_strategy_in_order_and_reports_progress():
         mock.patch.object(connection, 'find_ssh_key_file', return_value='/k/my-key.pem'),
         mock.patch.object(connection, 'valid_opkssh_key_file', return_value=None),
         mock.patch.object(connection, 'opkssh_login', return_value='/k/opkssh'),
-        mock.patch.object(connection, 'proxy_socket', return_value=mock.Mock()),
+        mock.patch.object(connection.SSMSession, 'open', side_effect=OSError('nope')) as open_ssm,
         mock.patch.object(connection, 'open_ssh', side_effect=fail),
     ):
         result = connect(TARGET, env, on_output=lambda _: None, on_waiting=lambda: None, on_progress=progress.append)
 
     assert calls == [
-        ('i-123', ['/k/my-key.pem'], True, True),  # SSM
         ('10.0.0.1', ['/k/opkssh'], False, False),  # opkssh
         ('10.0.0.1', ['/k/my-key.pem'], False, False),  # EC2 key
         ('10.0.0.1', [], True, False),  # default keys
     ]
     assert result is None
+    open_ssm.assert_called_once_with(['aws', 'ssm', 'start-session', '--target', 'i-123'])
     opkssh_key = shlex.quote(str(connection.opkssh_key_path('issuer,client')))
-    assert str(render_attempts(progress[0])).splitlines()[1:] == ["  opkssh", "  my-key", "  default key"]
+    assert progress[0][0].state == 'connecting'
+    assert progress[1][0].state == 'failed'
     assert str(render_attempts(progress[-1])).splitlines() == [
         "❌ Failed to connect via AWS SSM - nope",
-        (
-            "    ssh -o 'ProxyCommand=aws ssm start-session --target i-123 --document-name AWS-StartSSHSession"
-            " --parameters portNumber=22' -i /k/my-key.pem ec2-user@i-123"
-        ),
+        "    aws ssm start-session --target i-123",
         "❌ Failed to connect via opkssh - nope",
         (
             f"    opkssh login --provider issuer,client -i {opkssh_key}"
@@ -78,7 +76,7 @@ def test_connect_stops_at_first_success_and_reports_missing_tools():
 
     assert result == Connection(client, 'my-key')
     assert str(render_attempts(progress[-1])).splitlines() == [
-        "  session-manager-plugin not installed, skipping.",
+        "  AWS CLI or session-manager-plugin not installed, skipping.",
         "  opkssh not installed, skipping.",
         "✓ Connected via my-key",
         "  default key",

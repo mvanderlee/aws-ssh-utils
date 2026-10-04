@@ -1,4 +1,4 @@
-"""SSH connection strategies, tried in order until one succeeds."""
+"""SSM and SSH connection strategies, tried in order until one succeeds."""
 
 import os
 import shlex
@@ -17,6 +17,8 @@ from typing import IO, Literal, cast
 import paramiko
 from loguru import logger
 from typing_extensions import override
+
+from aws_ssh_utils.session import ShellChannel, SSMSession
 
 # CSV of issuer,client
 OPKSSH_PROVIDER_TAG = 'opkssh_provider'
@@ -54,7 +56,7 @@ class Environment:
 
 @dataclass(frozen=True)
 class Connection:
-    client: paramiko.SSHClient
+    client: paramiko.SSHClient | SSMSession
     via: str
     """How the connection was made: AWS SSM, opkssh, a key name, ..."""
 
@@ -64,7 +66,7 @@ class Attempt:
     via: str
     command: str
     """The equivalent command line, to retry by hand."""
-    open_client: Callable[[], paramiko.SSHClient] = field(repr=False, compare=False)
+    open_client: Callable[[], paramiko.SSHClient | SSMSession] = field(repr=False, compare=False)
     state: Literal['pending', 'connecting', 'connected', 'failed', 'skipped'] = 'pending'
     detail: str = ''
     """The error when failed, the reason when skipped."""
@@ -85,7 +87,7 @@ def connect(
 
     Tried in order:
     1. ~/.ssh/config, when a Host pattern (other than `*`) matches the instance id, an alias or the IP.
-    2. SSH over AWS SSM to the instance id, with any existing opkssh/EC2 key plus the default keys.
+    2. A keyless AWS SSM shell, authenticated with the AWS profile.
     3. opkssh, when the instance/cluster has opkssh tags. May open a browser login.
     4. The EC2 key pair (or `target.key_file`), when a matching file is found in ~/.ssh.
     5. The ssh-agent and default ~/.ssh/id_* keys.
@@ -95,6 +97,24 @@ def connect(
     """
     open_ssh_ = partial(open_ssh, confirm_host_key=confirm_host_key)
     attempts: list[Attempt] = []
+
+    def try_attempt(i: int) -> Connection | None:
+        attempt = attempts[i]
+        if attempt.state == 'skipped':
+            on_progress(list(attempts))
+            return None
+        attempts[i] = replace(attempt, state='connecting')
+        on_progress(list(attempts))
+        try:
+            client = attempt.open_client()
+        except Exception as e:
+            logger.debug(f"Failed to connect via {attempt.via}: {e!r}")
+            attempts[i] = replace(attempt, state='failed', detail=str(e) or type(e).__name__)
+            on_progress(list(attempts))
+            return None
+        attempts[i] = replace(attempt, state='connected')
+        on_progress(list(attempts))
+        return Connection(client, attempt.via)
 
     config = find_ssh_config(target)
     if config is not None:
@@ -107,21 +127,18 @@ def connect(
             ),
         )
 
-    ec2_key = target.key_file or find_ssh_key_file(target.key_name)
-    known_keys = [k for k in (valid_opkssh_key_file(target.opkssh_provider), ec2_key) if k]
-    ssm_proxy = ssm_command(target.instance_id, env)
-    ssm = Attempt(
-        "AWS SSM",
-        ssh_command(target.user, target.instance_id, known_keys, proxy=ssm_proxy),
-        lambda: open_ssh_(
-            target.instance_id,
-            target.user,
-            known_keys,
-            use_defaults=True,
-            sock=proxy_socket(ssm_proxy, on_output),
-        ),
+    command = ssm_command(target.instance_id, env)
+    ssm = Attempt('AWS SSM', shlex.join(command), lambda: SSMSession.open(command))
+    attempts.append(
+        ssm if env.ssm_installed else replace(ssm, state='skipped', detail="AWS CLI or session-manager-plugin not installed"),
     )
-    attempts.append(ssm if env.ssm_installed else replace(ssm, state='skipped', detail="session-manager-plugin not installed"))
+    for i in range(len(attempts)):
+        if result := try_attempt(i):
+            return result
+
+    # Key discovery is only needed for the remaining SSH fallbacks.
+    fallback_start = len(attempts)
+    ec2_key = target.key_file or find_ssh_key_file(target.key_name)
 
     if (provider := target.opkssh_provider) is not None:
         opkssh_key = str(opkssh_key_path(provider))
@@ -150,21 +167,9 @@ def connect(
         ),
     )
 
-    for i, attempt in enumerate(attempts):
-        if attempt.state == 'skipped':
-            continue
-        attempts[i] = replace(attempt, state='connecting')
-        on_progress(list(attempts))
-        try:
-            client = attempt.open_client()
-        except Exception as e:
-            logger.debug(f"Failed to connect via {attempt.via}: {e!r}")
-            attempts[i] = replace(attempt, state='failed', detail=str(e) or type(e).__name__)
-            on_progress(list(attempts))
-            continue
-        attempts[i] = replace(attempt, state='connected')
-        on_progress(list(attempts))
-        return Connection(client, attempt.via)
+    for i in range(fallback_start, len(attempts)):
+        if result := try_attempt(i):
+            return result
     return None
 
 
@@ -226,7 +231,9 @@ def ssh_command(
     return shlex.join([*cmd, f'{user}@{host}'])
 
 
-def open_shell_channel(client: paramiko.SSHClient) -> paramiko.Channel:
+def open_shell_channel(client: paramiko.SSHClient | SSMSession) -> ShellChannel:
+    if isinstance(client, SSMSession):
+        return client
     channel = client.get_transport().open_session()  # pyright: ignore[reportOptionalMemberAccess]
     channel.get_pty(term='xterm-256color')
     channel.invoke_shell()
@@ -301,10 +308,6 @@ def ssm_command(instance_id: str, env: Environment) -> list[str]:
         'start-session',
         '--target',
         instance_id,
-        '--document-name',
-        'AWS-StartSSHSession',
-        '--parameters',
-        'portNumber=22',
     ]
     if env.profile:
         cmd += ['--profile', env.profile]

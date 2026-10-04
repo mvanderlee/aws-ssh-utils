@@ -41,7 +41,7 @@ def ec2(
 ):
     """
     Asks user which EC2 instance they want to connect to,
-    then opens an interactive SSH session to the instance
+    then opens an interactive SSM or SSH session to the instance
     """
     session = boto3.Session(profile_name=profile, region_name=region)
     ec2_client = session.client('ec2')

@@ -22,17 +22,21 @@ It utilizes [questionary](https://pypi.org/project/questionary/) to ask you whic
 
 ## App
 
-Terminal UI to browse EC2 instances and EMR clusters, with SSH shells in tabs.
+Terminal UI to browse EC2 instances and EMR clusters, with SSM or SSH shells in tabs.
 It's the default command, so `aws_ssh` and `aws_ssh -p my-profile` launch it too.
-Each connection tries, in order: `~/.ssh/config`, SSH over AWS SSM (`session-manager-plugin`), opkssh (via instance/cluster tags),
+Each connection tries, in order: `~/.ssh/config`, a keyless AWS SSM shell, opkssh (via instance/cluster tags),
 the instance's EC2 key found in `~/.ssh`, then your default keys/ssh-agent.
-Unknown host keys are accepted and appended to `~/.ssh/known_hosts`; changed host keys are rejected.
+SSM uses `aws ssm start-session --target INSTANCE_ID` with the selected profile and region. It requires the AWS CLI,
+`session-manager-plugin`, and Session Manager access to the instance, but no SSH key, SSH server, or inbound port 22.
+The shell runs as the Session Manager configured user (usually `ssm-user`); SSH usernames and key options only apply
+to SSH connections. The `ec2` and `emr` commands use the same connection order; `emr-all` still uses SSH in tmux.
+For SSH connections, unknown host keys are accepted and appended to `~/.ssh/known_hosts`; changed host keys are rejected.
 
 ```shell
 $ aws_ssh app --help
 Usage: aws_ssh app [OPTIONS]
 
-  Browse EC2 instances and EMR clusters, and open SSH shells in tabs.
+  Browse EC2 instances and EMR clusters, and open SSM or SSH shells in tabs.
 
 Options:
   -p, --profile TEXT          Which AWS profile to use
@@ -56,7 +60,7 @@ $ aws_auth ec2 --help
 Usage: aws_ssh ec2 [OPTIONS]
 
   Asks user which EC2 instance they want to connect to, then opens an
-  interactive SSH session to the instance
+  interactive SSM or SSH session to the instance
 
 Options:
   -p, --profile TEXT    Which AWS profile to use
@@ -78,7 +82,7 @@ Select the EMR cluster, instance group, and instance to connect to.
 $ aws_ssh emr --help
 Usage: aws_ssh emr [OPTIONS]
 
-  Asks user which Cluster and EC2 instance they want to connect to, then opens an interactive SSH session to the instance
+  Asks user which Cluster and EC2 instance they want to connect to, then opens an interactive SSM or SSH session to the instance
 
 Options:
   -p, --profile TEXT    Which AWS profile to use

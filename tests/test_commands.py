@@ -102,7 +102,11 @@ def test_emr_asks_the_same_questions_and_opens_a_shell(continue_without_key, exi
         mock.patch.object(emr_command, 'questionary', questionary),
         mock.patch.object(emr_command, 'find_ssh_key_file', return_value=None),
         mock.patch.object(emr_command, 'open_shell') as open_shell,
-        mock.patch.object(emr_command, 'detect_environment'),
+        mock.patch.object(
+            emr_command,
+            'detect_environment',
+            return_value=connection.Environment(ssm_installed=False, opkssh_installed=False),
+        ),
     ):
         session.return_value.client.return_value = emr_client()
         result = CliRunner().invoke(cli, ['emr'])
@@ -126,6 +130,27 @@ def test_emr_asks_the_same_questions_and_opens_a_shell(continue_without_key, exi
         'scrollback': None,
         'initial_input': emr_command.CORE_NODE_INPUT,
     }
+
+
+def test_emr_does_not_ask_for_an_ssh_key_when_ssm_is_available():
+    questionary = mock.Mock()
+    questionary.select.return_value.unsafe_ask.side_effect = ['etl - j-1 - None', 'Core Instance Group', '10.1.0.3']
+    env = connection.Environment(ssm_installed=True, opkssh_installed=False)
+    with (
+        mock.patch.object(emr_command.boto3, 'Session') as session,
+        mock.patch('aws_ssh_utils.emr_utils.questionary', questionary),
+        mock.patch.object(emr_command, 'questionary', questionary),
+        mock.patch.object(emr_command, 'find_ssh_key_file') as find_key,
+        mock.patch.object(emr_command, 'open_shell') as open_shell,
+        mock.patch.object(emr_command, 'detect_environment', return_value=env),
+    ):
+        session.return_value.client.return_value = emr_client()
+        result = CliRunner().invoke(cli, ['emr'])
+
+    assert result.exit_code == 0, result.output
+    questionary.confirm.assert_not_called()
+    find_key.assert_not_called()
+    assert open_shell.call_args.args[1] is env
 
 
 @pytest.mark.parametrize(

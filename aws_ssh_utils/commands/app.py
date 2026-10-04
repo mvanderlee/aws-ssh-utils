@@ -48,7 +48,7 @@ ANIMATION_INTERVAL = 1 / 12
 @click.option('-r', '--region', default=None, help='Which AWS region to use')
 @scrollback_option
 def app(profile: str | None = None, region: str | None = None, scrollback: int | None = None, **kwargs: Any):
-    """Browse EC2 instances and EMR clusters, and open SSH shells in tabs."""
+    """Browse EC2 instances and EMR clusters, and open SSM or SSH shells in tabs."""
     try:
         session = boto3.Session(profile_name=profile, region_name=region)
         session.client('sts').get_caller_identity()

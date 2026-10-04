@@ -45,7 +45,7 @@ def emr(
 ):
     """
     Asks user which Cluster and EC2 instance they want to connect to,
-    then opens an interactive SSH session to the instance
+    then opens an interactive SSM or SSH session to the instance
     """
     session = boto3.Session(profile_name=profile, region_name=region)
     emr_client = session.client('emr')
@@ -65,9 +65,11 @@ def emr(
     with spinner():
         target = emr_target(emr_client, cluster_id, instance_ip.instance_id or '', ip)
     target = replace(target, user=user or target.user, key_file=key_file)
+    env = detect_environment(profile, session.region_name)
 
     if (
-        key_file is None
+        not env.ssm_installed
+        and key_file is None
         and target.opkssh_provider is None
         and find_ssh_key_file(target.key_name) is None
         and not questionary.confirm(f'Could not find the ssh key {target.key_name}, would you like to continue?').unsafe_ask()
@@ -78,7 +80,7 @@ def emr(
     postfix = f'[{group_idx}]' if group_idx else ''
     open_shell(
         target,
-        detect_environment(profile, session.region_name),
+        env,
         title=f'{cluster_name} - {group}{postfix}',
         scrollback=scrollback,
         initial_input=CORE_NODE_INPUT if group.lower().startswith('core') else b'',

@@ -34,6 +34,8 @@ dependencies = [
   "loguru",
   "paramiko",
   "pyte>=0.8.2",
+  "ptyprocess>=0.7.0; sys_platform != 'win32'",
+  "pywinpty>=3.0.0; sys_platform == 'win32'",
   "questionary",
   "requests>=2.34.2",
   "rich>=15.0.0",
