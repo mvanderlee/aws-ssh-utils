@@ -3,8 +3,10 @@
 import os
 import queue
 import re
+import signal
 import threading
 import time
+from contextlib import suppress
 from typing import Protocol, cast
 
 
@@ -19,6 +21,8 @@ class ShellClient(Protocol):
 
 
 class Pty(Protocol):
+    pid: int
+
     def read(self, size: int) -> str: ...
     def write(self, data: str) -> int: ...
     def setwinsize(self, rows: int, cols: int) -> None: ...
@@ -123,6 +127,11 @@ class SSMSession:
         if not self.closed:
             self.closed = True
             try:
+                if os.name != 'nt':
+                    # The reader thread holds the pty lock until every process on it exits,
+                    # including session-manager-plugin, which survives the SIGHUP sent to aws.
+                    with suppress(ProcessLookupError):
+                        os.killpg(self.process.pid, signal.SIGKILL)
                 self.process.close(force=True)
             finally:
                 self._output.put(None)

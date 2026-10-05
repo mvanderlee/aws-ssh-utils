@@ -10,7 +10,19 @@ from aws_ssh_utils.connection import Environment, Target
 from aws_ssh_utils.session import SSMSession
 
 
+@pytest.fixture(autouse=True)
+def fake_killpg(request):
+    """FakePty's pid is not a real process group."""
+    if request.node.name.startswith('test_real_pty'):
+        yield
+        return
+    with mock.patch.object(session.os, 'killpg', create=True):
+        yield
+
+
 class FakePty:
+    pid = 12345
+
     def __init__(self, *output):
         self.output = queue.Queue()
         for item in output:
@@ -175,4 +187,28 @@ def test_real_pty_input_output_resize_and_close():
     finally:
         client.close()
         reader.join(timeout=5)
+    assert not reader.is_alive()
+
+
+@pytest.mark.skipif(sys.platform == 'win32', reason='ConPTY closes without waiting on the reader')
+def test_real_pty_close_kills_grandchildren_that_ignore_sighup():
+    """Like session-manager-plugin under aws: the reader blocks until every process on the pty exits."""
+    grandchild = "import signal, time; signal.signal(signal.SIGHUP, signal.SIG_IGN); time.sleep(600)"
+    command = [
+        sys.executable,
+        '-c',
+        (
+            "import subprocess, sys; "
+            "print('Starting session with SessionId: local-test', flush=True); "
+            f"subprocess.run([sys.executable, '-c', {grandchild!r}])"
+        ),
+    ]
+    client = SSMSession.open(command, timeout=10)
+    reader = threading.Thread(target=lambda: [None for _ in iter(lambda: client.recv(65536), b'')], daemon=True)
+    reader.start()
+    closer = threading.Thread(target=client.close, daemon=True)
+    closer.start()
+    closer.join(timeout=10)
+    reader.join(timeout=5)
+    assert not closer.is_alive()
     assert not reader.is_alive()
