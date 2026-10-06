@@ -4,6 +4,7 @@ from unittest import mock
 
 import pytest
 from click.testing import CliRunner
+from textual import events
 from textual.app import App
 from textual.widgets import RichLog, Static, TabbedContent
 
@@ -20,7 +21,8 @@ from aws_ssh_utils.terminal import ShellStatus, Terminal, key_to_input, pyte_col
 TARGET = Target(instance_id='i-123', ip='10.0.0.1', user='ec2-user', key_name='my-key', opkssh_provider='issuer,client')
 
 
-def test_switching_shell_tabs_restores_keyboard_input():
+@pytest.mark.parametrize('paste_after_dialog', [False, True])
+def test_switching_shell_tabs_restores_keyboard_input(paste_after_dialog):
     app = SSHApp(mock.Mock(), mock.Mock(), Environment(False, False), 100)
     channels = [mock.Mock(), mock.Mock()]
 
@@ -33,6 +35,7 @@ def test_switching_shell_tabs_restores_keyboard_input():
         ):
             async with app.run_test(size=(140, 40)) as pilot:
                 for index, channel in enumerate(channels):
+                    channel.send.side_effect = len
                     app.open_shell(str(index), lambda: TARGET)
                     await pilot.pause()
                     pane = app.query_one(f'#shell-{index}', ShellPane)
@@ -46,7 +49,13 @@ def test_switching_shell_tabs_restores_keyboard_input():
                     terminal = shells.active_pane.query_one(Terminal)
                     assert app.focused is terminal
                     channels[index].send.reset_mock()
-                    await pilot.press('x')
+                    if paste_after_dialog:
+                        app.post_message(events.AppBlur())
+                        await pilot.pause()
+                        app.post_message(events.Paste('x'))
+                        await pilot.pause()
+                    else:
+                        await pilot.press('x')
                     channels[index].send.assert_called_once_with(b'x')
 
     asyncio.run(run())

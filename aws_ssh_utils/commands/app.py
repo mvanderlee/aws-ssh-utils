@@ -25,8 +25,8 @@ from aws_ssh_utils.cli_utils import detect_environment, detect_scrollback, rende
 from aws_ssh_utils.connection import Attempt, Environment, Target, connect, open_shell_channel
 from aws_ssh_utils.ec2_utils import ec2_name, ec2_target, get_running_ec2_instances
 from aws_ssh_utils.emr_utils import emr_target, get_emr_clusters, get_emr_instances, group_role, group_sort_key
-from aws_ssh_utils.logging_utils import LoggedApp, terminal_logging
-from aws_ssh_utils.terminal import ShellStatus, Terminal
+from aws_ssh_utils.logging_utils import terminal_logging
+from aws_ssh_utils.terminal import ShellStatus, Terminal, TerminalApp
 
 if TYPE_CHECKING:
     from mypy_boto3_ec2 import EC2Client
@@ -165,7 +165,7 @@ class ShellPane(TabPane):
         self.query_ancestor(TabbedContent).remove_pane(self.id or '')
 
 
-class SSHApp(LoggedApp):
+class SSHApp(TerminalApp):
     """The textual app"""
 
     TITLE = "AWS SSH"
@@ -183,8 +183,6 @@ class SSHApp(LoggedApp):
     }
     .error { color: $error; }
     """
-    # Its priority ctrl+p binding would steal shell history navigation from terminals.
-    ENABLE_COMMAND_PALETTE = False
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding('ctrl+q', 'quit', 'Quit', priority=True),
         Binding('f12', 'toggle_sidebar', 'Toggle sidebar', priority=True),

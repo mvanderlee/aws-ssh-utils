@@ -55,6 +55,7 @@ def test_scrolled_view_renders_history_then_screen():
 
 def test_typing_jumps_back_to_the_live_screen():
     channel = mock.Mock()
+    channel.send.side_effect = len
     terminal = terminal_with(scrollback=100, channel=channel)
     feed_lines(terminal, 50)
     with mock.patch.object(terminal, 'refresh'):

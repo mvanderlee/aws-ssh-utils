@@ -6,11 +6,41 @@ from unittest import mock
 import pytest
 from click.testing import CliRunner
 from loguru import logger
+from textual import events
 
 from aws_ssh_utils.commands.app import app as app_command
 from aws_ssh_utils.logging_utils import LoggedApp, terminal_logging
 from aws_ssh_utils.ssh import cli
-from aws_ssh_utils.terminal import Terminal
+from aws_ssh_utils.terminal import ShellApp, Terminal
+
+
+def test_paste_diagnostics_record_delivery_without_clipboard_contents(tmp_path):
+    log_file = tmp_path / 'paste.log'
+    channel = mock.Mock()
+    channel.send.side_effect = len
+    app = ShellApp('SSH', mock.Mock(), channel)
+    private_text = 'private-clipboard-content' * 512
+
+    async def run_app():
+        with mock.patch.object(Terminal, 'read_channel'), terminal_logging():
+            async with app.run_test() as pilot:
+                app.query_one(Terminal).feed(b'\x1b[?2004h')
+                app.post_message(events.AppBlur())
+                await pilot.pause()
+                app.post_message(events.Paste(private_text))
+                await pilot.pause()
+
+    with mock.patch.object(app_command, 'callback', side_effect=lambda **_: asyncio.run(run_app())):
+        result = CliRunner().invoke(cli, ['--log-file', str(log_file)])
+    assert result.exit_code == 0, result.output
+    output = log_file.read_text(encoding='utf-8')
+    assert 'Terminal input diagnostics v1' in output
+    assert 'Terminal focus event: AppBlur' in output
+    assert f'Paste app received: chars={len(private_text)}; app_focus=True; target=Terminal' in output
+    assert f'Paste shell received: chars={len(private_text)}; bracketed=True' in output
+    assert f'Paste shell sent: bytes={len(private_text.encode()) + 12};' in output
+    assert private_text not in output
+    assert 'Paste' not in result.output
 
 
 @pytest.mark.parametrize('command', ['implicit', 'explicit', 'equals'])

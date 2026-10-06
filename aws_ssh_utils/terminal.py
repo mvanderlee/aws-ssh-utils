@@ -1,10 +1,12 @@
 """Textual widgets rendering SSH and SSM shell channels through the pyte VT100 emulator."""
 
+import asyncio
 import datetime as dt
 import time
 from collections import deque
 from collections.abc import Sequence
 from functools import lru_cache
+from importlib.metadata import version
 from typing import Any
 
 import pyte
@@ -228,17 +230,45 @@ class Terminal(Widget, can_focus=True):
             event.prevent_default()
             self.send(data)
 
-    def on_paste(self, event: events.Paste):
+    async def on_paste(self, event: events.Paste):
+        event.stop()
         text = event.text
+        started = time.monotonic()
+        logger.bind(file_only=True).info(
+            'Paste shell received: chars={}; bracketed={}',
+            len(text),
+            BRACKETED_PASTE in self.vt.mode,
+        )
         if BRACKETED_PASTE in self.vt.mode:
             text = f'\x1b[200~{text}\x1b[201~'
-        self.send(text)
+        if self.scrolled:
+            self.scroll_history(-self.scrolled)
+        try:
+            # SSH flow control may block a large paste. Keep the app loop free
+            # so the reader can deliver output while input is still being sent.
+            await asyncio.to_thread(self._send_all, text.encode())
+            logger.bind(file_only=True).info(
+                'Paste shell sent: bytes={}; elapsed={:.3f}s',
+                len(text.encode()),
+                time.monotonic() - started,
+            )
+        except OSError:
+            logger.exception('Terminal paste failed')
+            self.post_message(self.Closed())
 
     def send(self, text: str):
         """Send user input, jumping back to the live screen like other terminals do."""
         if self.scrolled:
             self.scroll_history(-self.scrolled)
-        self.channel.send(text.encode())
+        self._send_all(text.encode())
+
+    def _send_all(self, data: bytes):
+        """A channel write may accept only one SSH packet or the available window."""
+        while data:
+            sent = self.channel.send(data)
+            if sent <= 0:
+                raise OSError('Terminal channel closed while sending input')
+            data = data[sent:]
 
     @override
     def render_line(self, y: int) -> Strip:
@@ -301,11 +331,36 @@ class ShellStatus(Horizontal):
         self.query_one('.duration', Static).update(f"{hours:02}:{minutes:02}:{seconds:02}")
 
 
-class ShellApp(LoggedApp):
-    """A single full-screen shell, exits when the shell closes."""
+class TerminalApp(LoggedApp):
+    """Shared input handling for apps containing interactive shell terminals."""
 
     # Its priority ctrl+p binding would steal shell history navigation from the terminal.
     ENABLE_COMMAND_PALETTE = False
+
+    def on_mount(self):
+        logger.bind(file_only=True).info('Terminal input diagnostics v1; textual={}', version('textual'))
+
+    @override
+    async def on_event(self, event: events.Event) -> None:
+        if isinstance(event, (events.AppFocus, events.AppBlur)):
+            logger.bind(file_only=True).info('Terminal focus event: {}', type(event).__name__)
+        if isinstance(event, events.Paste) and not event.is_forwarded and not self.app_focus:
+            # A terminal's paste confirmation dialog can send the paste before
+            # FocusIn. Textual restores the previous widget for keys/mouse, but
+            # not pastes, so they otherwise go to an unfocused screen and vanish.
+            self.app_focus = True
+        if isinstance(event, events.Paste) and not event.is_forwarded:
+            logger.bind(file_only=True).info(
+                'Paste app received: chars={}; app_focus={}; target={}',
+                len(event.text),
+                self.app_focus,
+                type(self.focused).__name__,
+            )
+        await super().on_event(event)
+
+
+class ShellApp(TerminalApp):
+    """A single full-screen shell, exits when the shell closes."""
 
     def __init__(self, via: str, client: ShellClient, channel: ShellChannel, scrollback: int = 0):
         super().__init__()
